@@ -50,3 +50,32 @@ describe('scanUtils', async () => {
     })
   })
 })
+
+describe('scanUtils document ebook formats', () => {
+  it('should treat doc, docx, rtf and pdb files as book media files', () => {
+    global.isWin = process.platform === 'win32'
+    global.ServerSettings = {
+      scannerParseSubtitle: true
+    }
+
+    const filePaths = ['Author/Book1/book.docx', 'Author/Book2/book.doc', 'Author/Book3/book.rtf', 'Author/Book4/book.pdb', 'Author/Book5/notes.odt']
+    const fileItems = filePaths.map((filePath) => {
+      const dirname = Path.dirname(filePath)
+      return {
+        name: Path.basename(filePath),
+        reldirpath: dirname === '.' ? '' : dirname,
+        extension: Path.extname(filePath),
+        deep: filePath.split('/').length - 1
+      }
+    })
+
+    const libraryItemGrouping = scanUtils.groupFileItemsIntoLibraryItemDirs('book', fileItems, false)
+
+    expect(libraryItemGrouping).to.deep.equal({
+      'Author/Book1': ['book.docx'],
+      'Author/Book2': ['book.doc'],
+      'Author/Book3': ['book.rtf'],
+      'Author/Book4': ['book.pdb']
+    })
+  })
+})

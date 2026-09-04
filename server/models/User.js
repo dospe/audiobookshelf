@@ -74,6 +74,7 @@ const { DataTypes, Model } = sequelize
  * @property {boolean} [hideFromContinueListening]
  * @property {string} [ebookLocation]
  * @property {number} [ebookProgress]
+ * @property {Object|null} [ebookSettings] per-book ereader settings overrides (null clears them)
  * @property {string} [finishedAt]
  * @property {number} [lastUpdate]
  * @property {number} [markAsFinishedTimeRemaining]
@@ -814,6 +815,10 @@ class User extends Model {
           libraryItemId: progressPayload.libraryItemId,
           progress: isNullOrNaN(progressPayload.progress) ? 0 : Number(progressPayload.progress)
         }
+      }
+      const ebookSettings = this.sequelize.models.mediaProgress.sanitizeEbookSettings(progressPayload.ebookSettings)
+      if (ebookSettings) {
+        newMediaProgressPayload.extraData.ebookSettings = ebookSettings
       }
       if (newMediaProgressPayload.isFinished) {
         newMediaProgressPayload.finishedAt = newMediaProgressPayload.finishedAt || new Date()

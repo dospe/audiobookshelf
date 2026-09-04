@@ -169,10 +169,35 @@ class MediaProgress extends Model {
       hideFromContinueListening: !!this.hideFromContinueListening,
       ebookLocation: this.ebookLocation,
       ebookProgress: this.ebookProgress,
+      ebookSettings: this.extraData?.ebookSettings || null,
       lastUpdate: this.updatedAt.valueOf(),
       startedAt: this.createdAt.valueOf(),
       finishedAt: this.finishedAt?.valueOf() || null
     }
+  }
+
+  /**
+   * Per-book ereader settings overrides stored in extraData.
+   * Only whitelisted keys are kept. Returns null when nothing is left.
+   *
+   * @param {Object|null} ebookSettings
+   * @returns {Object|null}
+   */
+  static sanitizeEbookSettings(ebookSettings) {
+    if (!ebookSettings || typeof ebookSettings !== 'object' || Array.isArray(ebookSettings)) return null
+    const allowedKeys = ['theme', 'font', 'fontScale', 'lineSpacing', 'textStroke', 'spread', 'legacyEncoding']
+    const sanitized = {}
+    for (const key of allowedKeys) {
+      const value = ebookSettings[key]
+      if (value === undefined || value === null) continue
+      if (typeof value === 'string') {
+        if (value.length > 64) continue
+        sanitized[key] = value
+      } else if (typeof value === 'number' && isFinite(value)) {
+        sanitized[key] = value
+      }
+    }
+    return Object.keys(sanitized).length ? sanitized : null
   }
 
   get progress() {
@@ -189,6 +214,16 @@ class MediaProgress extends Model {
    */
   async applyProgressUpdate(progressPayload) {
     if (!this.extraData) this.extraData = {}
+    if (progressPayload.ebookSettings !== undefined) {
+      const ebookSettings = MediaProgress.sanitizeEbookSettings(progressPayload.ebookSettings)
+      if (ebookSettings) {
+        this.extraData.ebookSettings = ebookSettings
+      } else {
+        delete this.extraData.ebookSettings
+      }
+      this.changed('extraData', true)
+      delete progressPayload.ebookSettings
+    }
     if (progressPayload.isFinished !== undefined) {
       if (progressPayload.isFinished && !this.isFinished) {
         this.finishedAt = progressPayload.finishedAt || Date.now()
