@@ -1,7 +1,7 @@
 <template>
   <div v-if="show" id="reader" :data-theme="ereaderTheme" class="group absolute top-0 left-0 w-full z-60 data-[theme=dark]:bg-primary data-[theme=dark]:text-white data-[theme=light]:bg-white data-[theme=light]:text-black data-[theme=sepia]:bg-[rgb(244,236,216)] data-[theme=sepia]:text-[#5b4636]" :class="{ 'reader-player-open': !!streamLibraryItem }">
     <div class="absolute top-4 left-4 z-20 flex items-center">
-      <button v-if="isEpub" @click="toggleToC" type="button" aria-label="Table of contents menu" class="inline-flex opacity-80 hover:opacity-100">
+      <button v-if="isEpub || isDocument" @click="toggleToC" type="button" aria-label="Table of contents menu" class="inline-flex opacity-80 hover:opacity-100">
         <span class="material-symbols text-2xl">menu</span>
       </button>
       <button v-if="hasSettings" @click="openSettings" type="button" aria-label="Ereader settings" class="mx-4 inline-flex opacity-80 hover:opacity-100">
@@ -23,7 +23,10 @@
       </button>
     </div>
 
-    <component v-if="componentName" ref="readerComponent" :is="componentName" :library-item="selectedLibraryItem" :player-open="!!streamLibraryItem" :keep-progress="keepProgress" :file-id="ebookFileId" @touchstart="touchstart" @touchend="touchend" @hook:mounted="readerMounted" />
+    <component v-if="componentName" ref="readerComponent" :is="componentName" :library-item="selectedLibraryItem" :player-open="!!streamLibraryItem" :keep-progress="keepProgress" :file-id="ebookFileId" :ebook-format="ebookFormat" @touchstart="touchstart" @touchend="touchend" @hook:mounted="readerMounted" />
+    <div v-else class="w-full h-full flex items-center justify-center px-8">
+      <p class="text-center text-gray-300">{{ $getString('MessageUnsupportedEbookFormat', [ebookFormat || '']) }}</p>
+    </div>
 
     <!-- TOC side nav -->
     <div v-if="tocOpen" class="w-full h-full overflow-y-scroll absolute inset-0 bg-black/20 z-20" @click.stop.prevent="toggleToC"></div>
@@ -109,11 +112,26 @@
           </div>
           <ui-range-input v-model="ereaderSettings.textStroke" :min="0" :max="300" :step="5" @input="settingsUpdated" />
         </div>
-        <div class="flex items-center">
+        <div v-if="isEpub" class="flex items-center mb-4">
           <div class="w-40">
             <p class="text-lg">{{ $strings.LabelLayout }}:</p>
           </div>
           <ui-toggle-btns v-model="ereaderSettings.spread" :items="spreadItems" @input="settingsUpdated" />
+        </div>
+        <div v-if="isDocument" class="flex items-center mb-4">
+          <div class="w-40">
+            <p class="text-lg">{{ $strings.LabelTextEncoding }}:</p>
+          </div>
+          <ui-dropdown v-model="ereaderSettings.legacyEncoding" :items="legacyEncodingItems" small class="w-56" @input="settingsUpdated" />
+        </div>
+        <div class="flex items-center">
+          <div class="w-40">
+            <p class="text-lg">{{ $strings.LabelBookSettings }}:</p>
+          </div>
+          <div>
+            <p class="text-xs text-gray-300 mb-2">{{ hasBookSettingsOverride ? $strings.MessageBookSettingsSaved : $strings.MessageBookSettingsDefault }}</p>
+            <ui-btn small :disabled="!hasBookSettingsOverride" @click="setBookSettingsAsDefault">{{ $strings.ButtonUseForAllBooks }}</ui-btn>
+          </div>
         </div>
       </div>
     </modals-modal>
@@ -121,6 +139,10 @@
 </template>
 
 <script>
+// Settings that are remembered per book (on the server) when they differ from
+// the global defaults
+const BOOK_SETTING_KEYS = ['theme', 'font', 'fontScale', 'lineSpacing', 'fontBoldness', 'textStroke', 'spread', 'legacyEncoding']
+
 export default {
   data() {
     return {
@@ -136,6 +158,9 @@ export default {
       searchQuery: '',
       tocOpen: false,
       showSettings: false,
+      globalEreaderSettings: null,
+      bookSettingsOverride: null,
+      bookSettingsSaveTimeout: null,
       ereaderSettings: {
         theme: 'dark',
         font: 'serif',
@@ -143,7 +168,8 @@ export default {
         lineSpacing: 115,
         fontBoldness: 100,
         spread: 'auto',
-        textStroke: 0
+        textStroke: 0,
+        legacyEncoding: ''
       }
     }
   },
@@ -164,8 +190,21 @@ export default {
       }
     },
     ereaderTheme() {
-      if (this.isEpub) return this.ereaderSettings.theme
+      if (this.isEpub || this.isDocument) return this.ereaderSettings.theme
       return 'dark'
+    },
+    legacyEncodingItems() {
+      return [
+        { text: this.$strings.LabelTextEncodingAuto, value: '' },
+        { text: 'Windows-1250 (CE)', value: 'windows-1250' },
+        { text: 'Windows-1252 (West)', value: 'windows-1252' },
+        { text: 'Windows-1251 (Cyrillic)', value: 'windows-1251' },
+        { text: 'ISO-8859-2', value: 'iso-8859-2' },
+        { text: 'UTF-8', value: 'utf-8' }
+      ]
+    },
+    hasBookSettingsOverride() {
+      return !!this.bookSettingsOverride && Object.keys(this.bookSettingsOverride).length > 0
     },
     spreadItems() {
       return [
@@ -212,13 +251,14 @@ export default {
       else if (this.ebookType === 'mobi') return 'readers-mobi-reader'
       else if (this.ebookType === 'pdf') return 'readers-pdf-reader'
       else if (this.ebookType === 'comic') return 'readers-comic-reader'
+      else if (this.ebookType === 'document') return 'readers-document-reader'
       return null
     },
     streamLibraryItem() {
       return this.$store.state.streamLibraryItem
     },
     hasSettings() {
-      return this.isEpub
+      return this.isEpub || this.isDocument
     },
     abTitle() {
       return this.mediaMetadata.title
@@ -261,6 +301,7 @@ export default {
       else if (this.isEpub) return 'epub'
       else if (this.isPdf) return 'pdf'
       else if (this.isComic) return 'comic'
+      else if (this.isDocument) return 'document'
       return null
     },
     isEpub() {
@@ -274,6 +315,9 @@ export default {
     },
     isComic() {
       return this.ebookFormat == 'cbz' || this.ebookFormat == 'cbr'
+    },
+    isDocument() {
+      return ['doc', 'docx', 'rtf', 'pdb'].includes(this.ebookFormat)
     },
     keepProgress() {
       return this.$store.state.ereaderKeepProgress
@@ -291,13 +335,70 @@ export default {
       this.$refs.readerComponent.goToChapter(uri)
     },
     readerMounted() {
-      if (this.isEpub) {
+      if (this.isEpub || this.isDocument) {
         this.loadEreaderSettings()
       }
     },
     settingsUpdated() {
-      this.$refs.readerComponent?.updateSettings?.(this.ereaderSettings)
-      localStorage.setItem('ereaderSettings', JSON.stringify(this.ereaderSettings))
+      this.applyEreaderSettings()
+      this.saveGlobalEreaderSettings()
+      this.saveBookSettings()
+    },
+    applyEreaderSettings() {
+      this.$refs.readerComponent?.updateSettings?.({ ...this.ereaderSettings })
+    },
+    /**
+     * Global settings are the defaults for every book. Per-book keys keep the
+     * value they had when the book was opened, everything else is stored as is.
+     */
+    saveGlobalEreaderSettings() {
+      const global = { ...this.ereaderSettings }
+      if (this.globalEreaderSettings) {
+        for (const key of BOOK_SETTING_KEYS) {
+          if (this.globalEreaderSettings[key] !== undefined) global[key] = this.globalEreaderSettings[key]
+        }
+      }
+      this.globalEreaderSettings = global
+      localStorage.setItem('ereaderSettings', JSON.stringify(global))
+    },
+    /** Per-book settings that differ from the global defaults, or null */
+    getBookSettingsDiff() {
+      if (!this.globalEreaderSettings) return null
+      const diff = {}
+      for (const key of BOOK_SETTING_KEYS) {
+        const value = this.ereaderSettings[key]
+        if (value === undefined || value === null) continue
+        if (value !== this.globalEreaderSettings[key]) diff[key] = value
+      }
+      return Object.keys(diff).length ? diff : null
+    },
+    saveBookSettings() {
+      const diff = this.getBookSettingsDiff()
+      const changed = JSON.stringify(diff) !== JSON.stringify(this.bookSettingsOverride)
+      this.bookSettingsOverride = diff
+      if (!changed || !this.selectedLibraryItem?.id) return
+
+      clearTimeout(this.bookSettingsSaveTimeout)
+      const libraryItemId = this.selectedLibraryItem.id
+      this.bookSettingsSaveTimeout = setTimeout(() => {
+        this.$axios.$patch(`/api/me/progress/${libraryItemId}`, { ebookSettings: diff }, { progress: false }).catch((error) => {
+          console.error('Failed to save book settings', error)
+        })
+      }, 1000)
+    },
+    /** Per-book settings saved in the media progress of the current book */
+    loadBookSettingsOverride() {
+      const progress = this.selectedLibraryItem?.id ? this.$store.getters['user/getUserMediaProgress'](this.selectedLibraryItem.id) : null
+      const override = progress?.ebookSettings
+      return override && typeof override === 'object' ? override : null
+    },
+    /** Make the current appearance settings the default for all books */
+    setBookSettingsAsDefault() {
+      const global = { ...(this.globalEreaderSettings || this.ereaderSettings) }
+      for (const key of BOOK_SETTING_KEYS) global[key] = this.ereaderSettings[key]
+      this.globalEreaderSettings = global
+      localStorage.setItem('ereaderSettings', JSON.stringify(global))
+      this.saveBookSettings()
     },
     toggleToC() {
       this.tocOpen = !this.tocOpen
@@ -398,11 +499,23 @@ export default {
               this.ereaderSettings[key] = _ereaderSettings[key]
             }
           }
-          this.settingsUpdated()
         }
       } catch (error) {
         console.error('Failed to load ereader settings', error)
       }
+      this.globalEreaderSettings = { ...this.ereaderSettings }
+
+      // Apply the settings remembered for this book on top of the defaults
+      clearTimeout(this.bookSettingsSaveTimeout)
+      const override = this.loadBookSettingsOverride()
+      this.bookSettingsOverride = null
+      if (override) {
+        for (const key of BOOK_SETTING_KEYS) {
+          if (override[key] !== undefined && override[key] !== null) this.ereaderSettings[key] = override[key]
+        }
+        this.bookSettingsOverride = this.getBookSettingsDiff()
+      }
+      this.applyEreaderSettings()
     },
     init() {
       this.registerListeners()
