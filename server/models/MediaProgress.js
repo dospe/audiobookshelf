@@ -185,7 +185,7 @@ class MediaProgress extends Model {
    */
   static sanitizeEbookSettings(ebookSettings) {
     if (!ebookSettings || typeof ebookSettings !== 'object' || Array.isArray(ebookSettings)) return null
-    const allowedKeys = ['theme', 'font', 'fontScale', 'lineSpacing', 'textStroke', 'spread', 'legacyEncoding']
+    const allowedKeys = ['theme', 'font', 'fontScale', 'lineSpacing', 'fontBoldness', 'textStroke', 'spread', 'legacyEncoding']
     const sanitized = {}
     for (const key of allowedKeys) {
       const value = ebookSettings[key]
