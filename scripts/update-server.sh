@@ -123,6 +123,8 @@ ABS_METADATA_DIR="${ABS_METADATA_DIR:-$ABS_DIR/metadata}"
 ABS_BACKUP_DIR="${ABS_BACKUP_DIR:-$ABS_DIR/backups}"
 ABS_BACKUP_KEEP="${ABS_BACKUP_KEEP:-7}"
 ABS_TZ="${ABS_TZ:-Europe/Prague}"
+# How long (ms) the server waits for a custom metadata provider response
+CUSTOM_METADATA_PROVIDER_TIMEOUT="${CUSTOM_METADATA_PROVIDER_TIMEOUT:-30000}"
 # Optional: run the server as this user (compose `user:`); empty = root (the image default)
 ABS_UID="${ABS_UID:-}"
 ABS_GID="${ABS_GID:-}"
@@ -331,6 +333,7 @@ EOF
   cat <<'EOF'
     environment:
       - TZ=${ABS_TZ}
+      - CUSTOM_METADATA_PROVIDER_TIMEOUT=${CUSTOM_METADATA_PROVIDER_TIMEOUT:-30000}
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:80/healthcheck"]
       interval: 30s

@@ -173,6 +173,7 @@ ABS_METADATA_DIR=/opt/audio/metadata
 ABS_BACKUP_DIR=/opt/audio/backups
 ABS_BACKUP_KEEP=7
 ABS_TZ=Europe/Prague
+CUSTOM_METADATA_PROVIDER_TIMEOUT=30000   # ms; jak dlouho ABS čeká na odpověď custom provideru
 
 # --- Czech metadata provider ---
 PROVIDER_ENABLED=true
@@ -436,7 +437,7 @@ novější server databázi migruje a starší verze ji pak neotevře.
 | rclone: `Transport endpoint is not connected` / `looks like a stale FUSE mount` | Zůstal odpojený mount: `sudo umount -l /mnt/gdrive` a spusťte skript znovu. |
 | `rclone.conf does not exist` | Vytvořte remote příkazem v sekci Úložiště přes rclone, nebo nastavte `RCLONE_ENABLED=false`. |
 | ABS nenajde provider | V ABS musí být URL `http://provider:8000` (název služby v compose síti), ne `localhost`. Pokud běží ABS mimo tento compose, použijte `http://<server>:8000`. |
-| Provider vrací prázdné výsledky | ABS má limit 10 s na metadata; snižte `REQUEST_TIMEOUT_SECONDS`/`SCRAPER_TIMEOUT_SECONDS` (max. 8) nebo vypněte pomalé zdroje `ENABLE_*=false`. |
+| Provider vrací prázdné výsledky | V logu ABS je `[CustomMetadataProvider] Search error timeout of Xms exceeded`: provider nestihl odpovědět. Zvyšte `CUSTOM_METADATA_PROVIDER_TIMEOUT` (ms, výchozí 30000), případně snižte `REQUEST_TIMEOUT_SECONDS`/`SCRAPER_TIMEOUT_SECONDS` nebo vypněte pomalé zdroje `ENABLE_*=false`. Timeout providerů musí zůstat pod hodnotou `CUSTOM_METADATA_PROVIDER_TIMEOUT`. |
 | `--check` hlásí chybu manifestu | `docker manifest inspect` potřebuje síť; zkontrolujte připojení k ghcr.io. |
 | Caddy nenaběhne, v logu `bind: address already in use` | Na portu 80/443 běží něco jiného (stará Caddy z jiného compose projektu, nginx). Zastavte to (`docker ps`, `ss -ltnp`) a spusťte `update-server.sh --service caddy --force`. |
 | HTTPS vrací 502 nebo `dial tcp: lookup audiobookshelf` | Caddy neběží ve stejné compose síti jako ABS. Tak to dopadne, když zůstala stará Caddy z původní instalace: převezměte ji znovu spuštěním `deploy.sh`, nebo dočasně `docker network connect audio_default <starý kontejner>`. |
