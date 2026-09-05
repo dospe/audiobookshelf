@@ -3,6 +3,7 @@
 # Idempotent update script for the Audiobookshelf stack in /opt/audio:
 #   - audiobookshelf  (ghcr.io/dospe/audiobookshelf, this fork)
 #   - provider        (ghcr.io/stecik/audiobookshelf_czech_metadata, Czech metadata provider)
+#   - caddy           (caddy:2, HTTPS reverse proxy with automatic Let's Encrypt certificates)
 #
 # Running it repeatedly is safe: it only creates what is missing, rewrites the
 # compose file only when its content changed, backs up the Audiobookshelf
@@ -11,20 +12,22 @@
 #
 # Usage:
 #   update-server.sh [--check] [--force] [--no-backup] [--service NAME]
-#                    [--tag TAG] [--provider-tag TAG] [--dir DIR]
+#                    [--tag TAG] [--provider-tag TAG] [--caddy-tag TAG] [--dir DIR]
 #
 # Options:
 #   --check           Only report whether newer images are available, change nothing
 #   --force           Recreate the containers even when the images did not change
 #   --no-backup       Skip the config backup for this run
-#   --service NAME    Limit the update to one service: audiobookshelf, provider (default: all)
+#   --service NAME    Limit the update to one service: audiobookshelf, provider, caddy (default: all)
 #   --tag TAG         Audiobookshelf image tag (default: latest; e.g. edge, v2.36.0,
 #                     or latest@sha256:<digest> for a pinned rollback), saved to .env
 #   --provider-tag T  Provider image tag (default: latest), saved to .env
+#   --caddy-tag TAG   Caddy image tag (default: 2), saved to .env
 #   --dir DIR         Deployment directory (default: $ABS_DIR or /opt/audio)
 #   -h, --help        Show this help
 #
 # Configuration lives in DIR/.env (created by deploy.sh; see docs/UPDATE.cs.md).
+# The Caddy site configuration is DIR/caddy/Caddyfile (created once, edit by hand).
 #
 # Exit codes: 0 ok / up to date, 1 error, 2 update available (only with --check)
 
@@ -37,13 +40,14 @@ DO_BACKUP=1
 SERVICE_FILTER="all"
 TAG_OVERRIDE=""
 PROVIDER_TAG_OVERRIDE=""
+CADDY_TAG_OVERRIDE=""
 DIR_OVERRIDE=""
 
 log() { printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"; }
 die() { log "ERROR: $*" >&2; exit 1; }
 
 usage() {
-  sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,33p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 while [[ $# -gt 0 ]]; do
@@ -57,6 +61,8 @@ while [[ $# -gt 0 ]]; do
     --tag=*) TAG_OVERRIDE="${1#--tag=}" ;;
     --provider-tag) [[ $# -ge 2 ]] || die "--provider-tag needs a value"; PROVIDER_TAG_OVERRIDE="$2"; shift ;;
     --provider-tag=*) PROVIDER_TAG_OVERRIDE="${1#--provider-tag=}" ;;
+    --caddy-tag) [[ $# -ge 2 ]] || die "--caddy-tag needs a value"; CADDY_TAG_OVERRIDE="$2"; shift ;;
+    --caddy-tag=*) CADDY_TAG_OVERRIDE="${1#--caddy-tag=}" ;;
     --dir) [[ $# -ge 2 ]] || die "--dir needs a value"; DIR_OVERRIDE="$2"; shift ;;
     --dir=*) DIR_OVERRIDE="${1#--dir=}" ;;
     -h|--help) usage; exit 0 ;;
@@ -66,8 +72,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 case "$SERVICE_FILTER" in
-  all|audiobookshelf|provider) ;;
-  *) die "--service must be audiobookshelf, provider or all" ;;
+  all|audiobookshelf|provider|caddy) ;;
+  *) die "--service must be audiobookshelf, provider, caddy or all" ;;
 esac
 
 # ---------------------------------------------------------------------------
@@ -115,9 +121,23 @@ PROVIDER_IMAGE="${PROVIDER_IMAGE:-ghcr.io/stecik/audiobookshelf_czech_metadata}"
 PROVIDER_TAG="${PROVIDER_TAG_OVERRIDE:-${PROVIDER_TAG:-latest}}"
 PROVIDER_PORT="${PROVIDER_PORT:-8000}"
 PROVIDER_ENABLED="${PROVIDER_ENABLED:-true}"
+CADDY_ENABLED="${CADDY_ENABLED:-false}"
+CADDY_IMAGE="${CADDY_IMAGE:-caddy}"
+CADDY_TAG="${CADDY_TAG_OVERRIDE:-${CADDY_TAG:-2}}"
+CADDY_DOMAIN="${CADDY_DOMAIN:-}"
+CADDY_EMAIL="${CADDY_EMAIL:-}"
+CADDY_HTTP_PORT="${CADDY_HTTP_PORT:-80}"
+CADDY_HTTPS_PORT="${CADDY_HTTPS_PORT:-443}"
+CADDY_DIR="$ABS_DIR/caddy"
+CADDYFILE="$CADDY_DIR/Caddyfile"
 
 ABS_REF="${ABS_IMAGE}:${ABS_TAG}"
 PROVIDER_REF="${PROVIDER_IMAGE}:${PROVIDER_TAG}"
+CADDY_REF="${CADDY_IMAGE}:${CADDY_TAG}"
+
+if [[ "$CADDY_ENABLED" == "true" && -z "$CADDY_DOMAIN" ]]; then
+  die "CADDY_ENABLED=true but CADDY_DOMAIN is empty in $ENV_FILE"
+fi
 
 # Persist tag overrides so later runs keep deploying them
 set_env_value() {
@@ -131,17 +151,41 @@ set_env_value() {
 if [[ $CHECK_ONLY -eq 0 ]]; then
   [[ -n "$TAG_OVERRIDE" ]] && set_env_value ABS_TAG "$TAG_OVERRIDE"
   [[ -n "$PROVIDER_TAG_OVERRIDE" ]] && set_env_value PROVIDER_TAG "$PROVIDER_TAG_OVERRIDE"
+  [[ -n "$CADDY_TAG_OVERRIDE" ]] && set_env_value CADDY_TAG "$CADDY_TAG_OVERRIDE"
 fi
 
 for d in "$ABS_AUDIOBOOKS_DIR" "$ABS_CONFIG_DIR" "$ABS_METADATA_DIR" "$ABS_BACKUP_DIR"; do
   [[ -d "$d" ]] || { log "Creating directory $d"; mkdir -p "$d"; }
 done
 
+# Caddyfile: written once from the template, afterwards it belongs to the admin
+write_caddyfile() {
+  mkdir -p "$CADDY_DIR/data" "$CADDY_DIR/config"
+  {
+    if [[ -n "$CADDY_EMAIL" ]]; then
+      printf '{\n\temail %s\n}\n\n' "$CADDY_EMAIL"
+    fi
+    printf '%s {\n\tencode zstd gzip\n\treverse_proxy audiobookshelf:80\n}\n' "$CADDY_DOMAIN"
+  } >"$CADDYFILE"
+}
+if [[ "$CADDY_ENABLED" == "true" && ! -f "$CADDYFILE" ]]; then
+  if [[ $CHECK_ONLY -eq 1 ]]; then
+    log "Caddyfile $CADDYFILE is missing (would be created)"
+  else
+    log "Creating $CADDYFILE for $CADDY_DOMAIN"
+    write_caddyfile
+  fi
+fi
+
 SERVICES=(audiobookshelf)
 [[ "$PROVIDER_ENABLED" == "true" ]] && SERVICES+=(provider)
+[[ "$CADDY_ENABLED" == "true" ]] && SERVICES+=(caddy)
 if [[ "$SERVICE_FILTER" != "all" ]]; then
   if [[ "$SERVICE_FILTER" == "provider" && "$PROVIDER_ENABLED" != "true" ]]; then
     die "the provider is disabled in $ENV_FILE (PROVIDER_ENABLED=false)"
+  fi
+  if [[ "$SERVICE_FILTER" == "caddy" && "$CADDY_ENABLED" != "true" ]]; then
+    die "caddy is disabled in $ENV_FILE (CADDY_ENABLED=false)"
   fi
   SERVICES=("$SERVICE_FILTER")
 fi
@@ -217,6 +261,30 @@ EOF
       start_period: 20s
 EOF
   fi
+  if [[ "$CADDY_ENABLED" == "true" ]]; then
+    cat <<'EOF'
+
+  # HTTPS reverse proxy (CADDY_DOMAIN); site config in ./caddy/Caddyfile, certificates in ./caddy/data
+  caddy:
+    image: ${CADDY_IMAGE}:${CADDY_TAG}
+    container_name: audiobookshelf-caddy
+    restart: unless-stopped
+    ports:
+      - "${CADDY_HTTP_PORT}:80"
+      - "${CADDY_HTTPS_PORT}:443"
+      - "${CADDY_HTTPS_PORT}:443/udp"
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./caddy/data:/data
+      - ./caddy/config:/config
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:2019/config/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+EOF
+  fi
 }
 
 COMPOSE_CONTENT="$(build_compose)"
@@ -238,9 +306,28 @@ image_id() { docker image inspect --format '{{.Id}}' "$1" 2>/dev/null || true; }
 image_digest() { docker image inspect --format '{{index .RepoDigests 0}}' "$1" 2>/dev/null | grep -o 'sha256:[0-9a-f]*' || true; }
 remote_digest() { docker manifest inspect "$1" 2>/dev/null | grep -m1 -o '"digest": *"sha256:[0-9a-f]*"' | grep -o 'sha256:[0-9a-f]*' || true; }
 
-container_name() { [[ "$1" == "provider" ]] && echo "audiobookshelf-provider" || echo "audiobookshelf"; }
-service_ref() { [[ "$1" == "provider" ]] && echo "$PROVIDER_REF" || echo "$ABS_REF"; }
-service_health_url() { [[ "$1" == "provider" ]] && echo "http://127.0.0.1:${PROVIDER_PORT}/health" || echo "http://127.0.0.1:${ABS_PORT}/healthcheck"; }
+container_name() {
+  case "$1" in
+    provider) echo "audiobookshelf-provider" ;;
+    caddy) echo "audiobookshelf-caddy" ;;
+    *) echo "audiobookshelf" ;;
+  esac
+}
+service_ref() {
+  case "$1" in
+    provider) echo "$PROVIDER_REF" ;;
+    caddy) echo "$CADDY_REF" ;;
+    *) echo "$ABS_REF" ;;
+  esac
+}
+# What to wait for after a (re)start: an http URL, or "docker" = the container's own health check
+service_health_url() {
+  case "$1" in
+    provider) echo "http://127.0.0.1:${PROVIDER_PORT}/health" ;;
+    caddy) echo "docker" ;;
+    *) echo "http://127.0.0.1:${ABS_PORT}/healthcheck" ;;
+  esac
+}
 
 container_id_of() { docker ps -aq --filter "name=^$(container_name "$1")$" || true; }
 container_state_of() {
@@ -251,12 +338,22 @@ container_image_of() {
   local id; id="$(container_id_of "$1")"
   [[ -n "$id" ]] && docker inspect --format '{{.Image}}' "$id" || true
 }
+container_health_of() {
+  local id; id="$(container_id_of "$1")"
+  [[ -n "$id" ]] && docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$id" || echo "absent"
+}
 
 wait_healthy() {
   local url="$1" name="$2"
-  log "Waiting for $url"
+  if [[ "$url" == "docker" ]]; then
+    log "Waiting for the health check of $(container_name "$name")"
+  else
+    log "Waiting for $url"
+  fi
   for _ in $(seq 1 60); do
-    if curl -fsS -o /dev/null --max-time 3 "$url"; then
+    if [[ "$url" == "docker" ]]; then
+      [[ "$(container_health_of "$name")" == "healthy" ]] && { log "$name is up"; return 0; }
+    elif curl -fsS -o /dev/null --max-time 3 "$url"; then
       log "$name is up"
       return 0
     fi
@@ -372,11 +469,15 @@ for svc in "${RECREATE[@]}"; do
 done
 
 if [[ $FAILED -eq 1 ]]; then
-  log "To roll back: $SCRIPT_NAME --tag <previous tag or latest@sha256:<digest>> (or --provider-tag); config backups are in $ABS_BACKUP_DIR" >&2
+  log "To roll back: $SCRIPT_NAME --tag <previous tag or latest@sha256:<digest>> (or --provider-tag, --caddy-tag); config backups are in $ABS_BACKUP_DIR" >&2
   exit 1
 fi
 
 docker image prune -f >/dev/null 2>&1 || true
-log "Done. Audiobookshelf: http://<server>:${ABS_PORT}/"
+if [[ "$CADDY_ENABLED" == "true" ]]; then
+  log "Done. Audiobookshelf: https://${CADDY_DOMAIN}/ (directly: http://<server>:${ABS_PORT}/)"
+else
+  log "Done. Audiobookshelf: http://<server>:${ABS_PORT}/"
+fi
 [[ "$PROVIDER_ENABLED" == "true" ]] && log "Metadata provider: http://<server>:${PROVIDER_PORT}/ (in Audiobookshelf use http://provider:8000)"
 exit 0

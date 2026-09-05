@@ -8,26 +8,30 @@ skriptů z `scripts/`:
 | `deploy.sh` | První instalace nebo znovunasazení: založí `/opt/audio`, převezme data ze staré instalace, vytvoří konfiguraci a stack spustí. Umí i vzdálený režim přes SSH. |
 | `update-server.sh` | Běžná idempotentní aktualizace: stáhne nové image, zazálohuje config, znovu vytvoří jen změněné kontejnery, ověří health check. Vhodné pro cron. |
 
-Stack tvoří dvě služby v jednom Docker Compose projektu:
+Stack tvoří tři služby v jednom Docker Compose projektu:
 
 | Služba | Image | Port na hostiteli | Poznámka |
 | --- | --- | --- | --- |
 | `audiobookshelf` | `ghcr.io/dospe/audiobookshelf` (tento fork) | `ABS_PORT`, výchozí 13378 | web UI a API |
 | `provider` | `ghcr.io/stecik/audiobookshelf_czech_metadata` | `PROVIDER_PORT`, výchozí 8000 | český metadata provider; ABS ho volá uvnitř compose sítě jako `http://provider:8000` |
+| `caddy` | `caddy:2` | 80 a 443 (`CADDY_HTTP_PORT`, `CADDY_HTTPS_PORT`) | HTTPS reverzní proxy pro `CADDY_DOMAIN` s automatickým certifikátem Let's Encrypt; nasazuje se jen s nastavenou doménou |
 
-Oba image jsou veřejné, na serveru není potřeba žádné přihlášení k registru.
+Všechny image jsou veřejné, na serveru není potřeba žádné přihlášení k registru.
 
 ## Rozložení `/opt/audio`
 
 | Cesta | Obsah |
 | --- | --- |
-| `/opt/audio/.env` | jediný konfigurační soubor obou služeb; vytvoří ho `deploy.sh`, dál se edituje ručně a nikdy se nepřepisuje |
+| `/opt/audio/.env` | jediný konfigurační soubor všech služeb; vytvoří ho `deploy.sh`, dál se edituje ručně a nikdy se nepřepisuje |
 | `/opt/audio/docker-compose.yml` | generovaný skriptem `update-server.sh`, ručně neupravovat |
 | `/opt/audio/deploy.sh`, `/opt/audio/update-server.sh` | kopie skriptů, které `deploy.sh` nainstaluje |
 | `/opt/audio/config` | databáze a nastavení Audiobookshelf (zálohovat) |
 | `/opt/audio/metadata` | obálky, cache, streamy (lze znovu vygenerovat) |
 | `/opt/audio/backups` | zálohy configu z aktualizací (`config-<datum>.tar.gz`) |
 | `/opt/audio/audiobooks` | knihovna, pokud není v `.env` nastavena jiná cesta (`ABS_AUDIOBOOKS_DIR`) |
+| `/opt/audio/caddy/Caddyfile` | konfigurace HTTPS proxy; vznikne při nasazení (převzatá ze staré instalace nebo vygenerovaná z `--domain`), dál se edituje ručně a nepřepisuje se |
+| `/opt/audio/caddy/data` | certifikáty a účet Let's Encrypt (zálohovat spolu s configem; při ztrátě si Caddy vyžádá nové) |
+| `/opt/audio/caddy/config` | interní stav Caddy |
 | `/opt/audio/.update.lock` | zámek proti souběhu aktualizací |
 
 ## Požadavky
@@ -35,7 +39,8 @@ Oba image jsou veřejné, na serveru není potřeba žádné přihlášení k re
 - Linux s Dockerem 20.10+ a pluginem Docker Compose v2 (`docker compose version`).
 - `curl`, `tar`, `flock` (balík `util-linux`), volitelně `rsync` pro rychlejší migraci dat.
 - Root nebo `sudo` (skripty zapisují do `/opt/audio`; `deploy.sh` se sám znovu spustí přes `sudo`).
-- Síťový přístup na `ghcr.io`.
+- Síťový přístup na `ghcr.io` a `docker.io` (image Caddy).
+- Pro HTTPS: DNS záznam domény míří na server a porty 80 a 443 jsou zvenku dostupné (Let's Encrypt ověřuje přes HTTP na portu 80). Na portech nesmí běžet nic jiného (jiná Caddy, nginx, Apache).
 
 Skripty jsou v soukromém repozitáři `dospe/audiobookshelf`, takže je na server
 dostanete buď přes `scp` z naklonovaného repozitáře, nebo přes `curl` s classic
@@ -84,15 +89,25 @@ sudo /opt/audio/deploy.sh
    - najde starý provider z původního `deploy.sh` v `~/abs-czech-metadata`
      (v domovském adresáři uživatele i roota), převezme jeho `.env`
      (`HOST_PORT` → `PROVIDER_PORT`, token, `ENABLE_*` …), starý compose
-     projekt zastaví a složku přejmenuje na `abs-czech-metadata.migrated-<datum>`.
+     projekt zastaví a složku přejmenuje na `abs-czech-metadata.migrated-<datum>`;
+   - najde starý kontejner Caddy (název `caddy` nebo image `caddy:*`) z
+     jiného compose projektu, z jeho Caddyfile vyčte doménu a e-mail pro
+     Let's Encrypt, Caddyfile i certifikáty (`/data`, `/config`; z bind mountu
+     i z pojmenovaného svazku) zkopíruje do `/opt/audio/caddy`, kontejner
+     odstraní, a pokud ve starém compose projektu už žádný kontejner nezbyl,
+     přejmenuje jeho složku na `<název>.migrated-<datum>`. Tento krok proběhne
+     i nad existující instalací v `/opt/audio`, která ještě sekci `CADDY_*`
+     v `.env` nemá.
 3. Vytvoří `/opt/audio/.env` (výchozí hodnoty + zjištěné cesty + importované
-   hodnoty provideru). Při dalších bězích `.env` zachová a jen do něj promítne
-   volby z příkazové řádky.
-4. Spustí `update-server.sh --force`: zapíše compose, stáhne oba image,
-   vytvoří kontejnery a počká na `/healthcheck` (ABS) a `/health` (provider).
+   hodnoty provideru + doména Caddy). Při dalších bězích `.env` zachová a jen
+   do něj promítne volby z příkazové řádky.
+4. Spustí `update-server.sh --force`: zapíše compose, vytvoří chybějící
+   `caddy/Caddyfile`, stáhne image, vytvoří kontejnery a počká na
+   `/healthcheck` (ABS), `/health` (provider) a health check Caddy.
 
 Kopírování dat probíhá jen do prázdné cílové složky; existující obsah
-`/opt/audio/config` se nikdy nepřepíše.
+`/opt/audio/config`, `/opt/audio/caddy/Caddyfile` ani `/opt/audio/caddy/data`
+se nikdy nepřepíše.
 
 ### Volby `deploy.sh`
 
@@ -103,14 +118,17 @@ Kopírování dat probíhá jen do prázdné cílové složky; existující obsa
 | `--audiobooks PATH` | Cesta ke knihovně na hostiteli (jinak z migrace, jinak `DIR/audiobooks`). |
 | `--port N` | Port Audiobookshelf (výchozí 13378). |
 | `--provider-port N` | Port provideru (výchozí 8000). |
-| `--tag TAG`, `--provider-tag TAG` | Tagy image (výchozí `latest`). |
+| `--domain HOST` | Veřejná doména pro HTTPS (`CADDY_DOMAIN`, zapne `CADDY_ENABLED=true`). Bez ní se doména bere ze starého Caddyfile; když není známa žádná, Caddy se nenasadí. |
+| `--email ADRESA` | Kontaktní e-mail pro Let's Encrypt (`CADDY_EMAIL`; jinak ze starého Caddyfile). |
+| `--tag TAG`, `--provider-tag TAG`, `--caddy-tag TAG` | Tagy image (výchozí `latest`, `latest`, `2`). |
 | `--no-provider` | Provider nenasazovat (`PROVIDER_ENABLED=false`). |
+| `--no-caddy` | Caddy nenasazovat (`CADDY_ENABLED=false`); starý kontejner Caddy se pak jen zastaví. |
 | `--no-migrate` | Nehledat starou instalaci. |
 
 ### Po instalaci
 
-1. Otevřete `http://<server>:13378/`. Při migraci se přihlásíte původními účty;
-   při čisté instalaci projdete průvodcem.
+1. Otevřete `https://<doména>/` (s Caddy) nebo `http://<server>:13378/`. Při
+   migraci se přihlásíte původními účty; při čisté instalaci projdete průvodcem.
 2. Knihovna má uvnitř kontejneru cestu `/audiobooks`; při čisté instalaci ji
    v ABS založte s touto cestou.
 3. Provider přidejte v ABS: Nastavení → Metadata Tools → Custom Metadata
@@ -149,11 +167,64 @@ AUDIOBOOKSHELF_AUTH_TOKEN=
 SCRAPER_USER_AGENT=
 ENABLE_ALZA=true
 # ... ENABLE_<zdroj>=true/false pro každý obchod, ENABLE_DATABAZEKNIH=false
+
+# --- Caddy: HTTPS reverse proxy (Let's Encrypt) ---
+CADDY_ENABLED=true                  # false = Caddy se nenasadí (kontejner se odstraní jako orphan)
+CADDY_DOMAIN=audio.example.cz       # veřejná doména; musí být vyplněna, když je CADDY_ENABLED=true
+CADDY_EMAIL=admin@example.cz        # kontakt pro Let's Encrypt (nepovinné)
+CADDY_IMAGE=caddy
+CADDY_TAG=2
+CADDY_HTTP_PORT=80
+CADDY_HTTPS_PORT=443
 ```
 
 Změna hodnot v `.env` se projeví při dalším běhu `update-server.sh`
 (compose změnu portů a cest pozná a kontejner znovu vytvoří); pro jistotu
 lze spustit `update-server.sh --force`.
+
+## HTTPS přes Caddy
+
+Caddy běží jako služba `caddy` ve stejném compose projektu, takže
+Audiobookshelf oslovuje uvnitř sítě jako `audiobookshelf:80`. Certifikát pro
+`CADDY_DOMAIN` si vyžádá sama při prvním startu (HTTP-01 na portu 80) a
+obnovuje ho automaticky; certifikáty a účet Let's Encrypt jsou v
+`/opt/audio/caddy/data`, proto se při migraci kopírují a nevydávají se znovu.
+
+Výchozí `/opt/audio/caddy/Caddyfile`:
+
+```caddyfile
+{
+	email admin@example.cz
+}
+
+audio.example.cz {
+	encode zstd gzip
+	reverse_proxy audiobookshelf:80
+}
+```
+
+Caddyfile je váš: skripty ho vytvoří jen tehdy, když neexistuje. Po ruční
+úpravě ho načtěte bez výpadku:
+
+```bash
+docker exec audiobookshelf-caddy caddy reload --config /etc/caddy/Caddyfile
+```
+
+Změna `CADDY_DOMAIN` v `.env` Caddyfile nemění; doménu upravte v obou
+souborech (`.env` slouží skriptům pro výpis a kontrolu). Chcete-li provider
+zpřístupnit i zvenku přes HTTPS, přidejte do bloku domény například:
+
+```caddyfile
+	handle_path /provider/* {
+		reverse_proxy provider:8000
+	}
+```
+
+V ABS ale nadále používejte interní URL `http://provider:8000`.
+
+Stávající instalace v `/opt/audio` bez Caddy se doplní znovu spuštěním
+`deploy.sh` (najde starý kontejner `caddy` a převezme ho) nebo
+`deploy.sh --domain <doména> --email <adresa>` (čistá konfigurace).
 
 ## Běžná aktualizace
 
@@ -192,11 +263,12 @@ aktualizace je daná služba nedostupná zhruba 10 až 60 sekund.
 | Volba | Význam |
 | --- | --- |
 | `--check` | Jen porovná digesty na ghcr s lokálními; nic nemění. Návratový kód `0` = aktuální, `2` = je aktualizace (nebo není nainstalováno), `1` = chyba. |
-| `--service audiobookshelf` / `--service provider` | Aktualizuje jen jednu službu. |
+| `--service audiobookshelf` / `--service provider` / `--service caddy` | Aktualizuje jen jednu službu. |
 | `--force` | Znovu vytvoří kontejnery i bez nového image (např. po změně `.env`). |
 | `--no-backup` | Přeskočí zálohu configu. |
 | `--tag TAG` | Tag Audiobookshelf; uloží se do `.env` jako `ABS_TAG`. |
 | `--provider-tag TAG` | Tag provideru; uloží se jako `PROVIDER_TAG`. |
+| `--caddy-tag TAG` | Tag Caddy (výchozí `2`); uloží se jako `CADDY_TAG`. |
 | `--dir DIR` | Jiná nasazovací složka. |
 
 ## Automatická aktualizace
@@ -276,7 +348,10 @@ novější server databázi migruje a starší verze ji pak neotevře.
 ## Ověření
 
 - `http://<server>:13378/healthcheck` vrací HTTP 200; `http://<server>:8000/health` také.
-- `docker compose -f /opt/audio/docker-compose.yml ps` ukazuje obě služby jako `healthy`.
+- `https://<doména>/healthcheck` vrací HTTP 200 s platným certifikátem
+  (`curl -sSI https://<doména>/healthcheck`); `docker logs audiobookshelf-caddy`
+  bez chyb `obtaining certificate`.
+- `docker compose -f /opt/audio/docker-compose.yml ps` ukazuje všechny služby jako `healthy`.
 - V ABS proběhne vyhledání metadat přes provider (Match u libovolné knihy).
 - `docker compose -f /opt/audio/docker-compose.yml logs --tail 100` bez chyb.
 
@@ -293,3 +368,7 @@ novější server databázi migruje a starší verze ji pak neotevře.
 | ABS nenajde provider | V ABS musí být URL `http://provider:8000` (název služby v compose síti), ne `localhost`. Pokud běží ABS mimo tento compose, použijte `http://<server>:8000`. |
 | Provider vrací prázdné výsledky | ABS má limit 10 s na metadata; snižte `REQUEST_TIMEOUT_SECONDS`/`SCRAPER_TIMEOUT_SECONDS` (max. 8) nebo vypněte pomalé zdroje `ENABLE_*=false`. |
 | `--check` hlásí chybu manifestu | `docker manifest inspect` potřebuje síť; zkontrolujte připojení k ghcr.io. |
+| Caddy nenaběhne, v logu `bind: address already in use` | Na portu 80/443 běží něco jiného (stará Caddy z jiného compose projektu, nginx). Zastavte to (`docker ps`, `ss -ltnp`) a spusťte `update-server.sh --service caddy --force`. |
+| HTTPS vrací 502 nebo `dial tcp: lookup audiobookshelf` | Caddy neběží ve stejné compose síti jako ABS. Tak to dopadne, když zůstala stará Caddy z původní instalace: převezměte ji znovu spuštěním `deploy.sh`, nebo dočasně `docker network connect audio_default <starý kontejner>`. |
+| V logu Caddy `obtaining certificate ... failed` | DNS domény nemíří na server, port 80 není zvenku dostupný, nebo `CADDY_DOMAIN` v Caddyfile neodpovídá. Caddy zkouší znovu sama; při opakovaných chybách pozor na limity Let's Encrypt (5 vydání týdně na doménu). |
+| `CADDY_ENABLED=true but CADDY_DOMAIN is empty` | Doplňte `CADDY_DOMAIN` v `.env` (a doménu v `caddy/Caddyfile`), nebo nastavte `CADDY_ENABLED=false`. |

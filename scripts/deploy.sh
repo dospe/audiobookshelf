@@ -3,15 +3,18 @@
 # Install (or re-deploy) the Audiobookshelf stack in /opt/audio:
 #   - audiobookshelf  (ghcr.io/dospe/audiobookshelf, this fork)
 #   - provider        (ghcr.io/stecik/audiobookshelf_czech_metadata, Czech metadata provider)
+#   - caddy           (caddy:2, HTTPS reverse proxy with automatic Let's Encrypt certificates)
 #
 # What it does (idempotent, safe to re-run):
 #   1. creates /opt/audio and installs deploy.sh + update-server.sh into it
 #   2. on the first run migrates an existing installation: an old
-#      "audiobookshelf" container (or /opt/audiobookshelf/{config,metadata})
-#      and an old provider deployment (~/abs-czech-metadata/.env) are taken
-#      over, their data copied into /opt/audio and the old containers removed
+#      "audiobookshelf" container (or /opt/audiobookshelf/{config,metadata}),
+#      an old provider deployment (~/abs-czech-metadata/.env) and an old
+#      "caddy" container (Caddyfile + certificates) are taken over, their
+#      data copied into /opt/audio and the old containers removed
 #   3. creates /opt/audio/.env (never overwritten later; edit it by hand)
-#   4. runs update-server.sh --force: writes docker-compose.yml, pulls both
+#      and /opt/audio/caddy/Caddyfile (migrated, or generated from --domain)
+#   4. runs update-server.sh --force: writes docker-compose.yml, pulls the
 #      images, starts the containers and waits for their health checks
 #
 # Usage:
@@ -24,9 +27,14 @@
 #                         from the old container, else DIR/audiobooks)
 #   --port N              Audiobookshelf host port (default: 13378)
 #   --provider-port N     Provider host port (default: 8000)
+#   --domain HOST         Public host name served over HTTPS by Caddy (default: taken
+#                         from the old Caddyfile; without a domain Caddy is not deployed)
+#   --email ADDRESS       Contact e-mail for Let's Encrypt (default: from the old Caddyfile)
 #   --tag TAG             Audiobookshelf image tag (default: latest)
 #   --provider-tag TAG    Provider image tag (default: latest)
+#   --caddy-tag TAG       Caddy image tag (default: 2)
 #   --no-provider         Do not deploy the metadata provider
+#   --no-caddy            Do not deploy Caddy (CADDY_ENABLED=false)
 #   --no-migrate          Do not look for / take over an old installation
 #   -h, --help            Show this help
 #
@@ -39,16 +47,20 @@ SCRIPT_DIR="$(dirname "$SCRIPT_PATH")"
 
 log() { printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"; }
 die() { log "ERROR: $*" >&2; exit 1; }
-usage() { sed -n '2,33p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; }
 
 REMOTE=""
 ABS_DIR="/opt/audio"
 AUDIOBOOKS_OVERRIDE=""
 PORT_OVERRIDE=""
 PROVIDER_PORT_OVERRIDE=""
+DOMAIN_OVERRIDE=""
+EMAIL_OVERRIDE=""
 TAG_OVERRIDE=""
 PROVIDER_TAG_OVERRIDE=""
+CADDY_TAG_OVERRIDE=""
 PROVIDER_ENABLED="true"
+CADDY_DISABLED=0
 MIGRATE=1
 ARGS=("$@")
 
@@ -68,7 +80,14 @@ while [[ $# -gt 0 ]]; do
     --tag=*) TAG_OVERRIDE="${1#--tag=}" ;;
     --provider-tag) [[ $# -ge 2 ]] || die "--provider-tag needs a value"; PROVIDER_TAG_OVERRIDE="$2"; shift ;;
     --provider-tag=*) PROVIDER_TAG_OVERRIDE="${1#--provider-tag=}" ;;
+    --caddy-tag) [[ $# -ge 2 ]] || die "--caddy-tag needs a value"; CADDY_TAG_OVERRIDE="$2"; shift ;;
+    --caddy-tag=*) CADDY_TAG_OVERRIDE="${1#--caddy-tag=}" ;;
+    --domain) [[ $# -ge 2 ]] || die "--domain needs a value"; DOMAIN_OVERRIDE="$2"; shift ;;
+    --domain=*) DOMAIN_OVERRIDE="${1#--domain=}" ;;
+    --email) [[ $# -ge 2 ]] || die "--email needs a value"; EMAIL_OVERRIDE="$2"; shift ;;
+    --email=*) EMAIL_OVERRIDE="${1#--email=}" ;;
     --no-provider) PROVIDER_ENABLED="false" ;;
+    --no-caddy) CADDY_DISABLED=1 ;;
     --no-migrate) MIGRATE=0 ;;
     -h|--help) usage; exit 0 ;;
     *) die "Unknown option: $1 (see --help)" ;;
@@ -76,12 +95,14 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
-for v in "$TAG_OVERRIDE" "$PROVIDER_TAG_OVERRIDE"; do
+for v in "$TAG_OVERRIDE" "$PROVIDER_TAG_OVERRIDE" "$CADDY_TAG_OVERRIDE"; do
   [[ -z "$v" || "$v" =~ ^[A-Za-z0-9._@:-]+$ ]] || die "invalid tag: $v"
 done
 for v in "$PORT_OVERRIDE" "$PROVIDER_PORT_OVERRIDE"; do
   [[ -z "$v" || "$v" =~ ^[0-9]+$ ]] || die "invalid port: $v"
 done
+[[ -z "$DOMAIN_OVERRIDE" || "$DOMAIN_OVERRIDE" =~ ^[A-Za-z0-9.-]+$ ]] || die "invalid domain: $DOMAIN_OVERRIDE"
+[[ -z "$EMAIL_OVERRIDE" || "$EMAIL_OVERRIDE" =~ ^[^[:space:]]+@[^[:space:]]+$ ]] || die "invalid e-mail: $EMAIL_OVERRIDE"
 
 # ---------------------------------------------------------------------------
 # Remote mode: copy both scripts to the host and run deploy there
@@ -144,6 +165,13 @@ DETECTED_CONFIG_SRC=""
 DETECTED_METADATA_SRC=""
 OLD_CONTAINER=""
 OLD_PROVIDER_DIR=""
+OLD_CADDY=""
+OLD_CADDY_PROJECT_DIR=""
+OLD_CADDYFILE_SRC=""
+OLD_CADDY_DATA_SRC=""
+OLD_CADDY_CONFIG_SRC=""
+DETECTED_DOMAIN=""
+DETECTED_EMAIL=""
 PROVIDER_IMPORT=()
 
 home_dirs() {
@@ -219,9 +247,63 @@ if [[ $MIGRATE -eq 1 && ! -f "$ENV_FILE" ]]; then
   fi
 fi
 
+# 4. an old Caddy container (also when .env already exists but Caddy was never configured in it)
+caddyfile_domain() { grep -m1 -oE '^[A-Za-z0-9][A-Za-z0-9.-]*(:[0-9]+)?[[:space:]]*\{' "$1" 2>/dev/null | sed -E 's/[[:space:]]*\{$//; s/:[0-9]+$//' || true; }
+caddyfile_email() { grep -m1 -oE '^[[:space:]]*email[[:space:]]+[^[:space:]]+' "$1" 2>/dev/null | awk '{print $2}' || true; }
+
+if [[ $MIGRATE -eq 1 && $CADDY_DISABLED -eq 0 ]] && ! { [[ -f "$ENV_FILE" ]] && grep -q '^CADDY_ENABLED=' "$ENV_FILE"; }; then
+  while read -r cid cname cimage; do
+    [[ -n "$cid" ]] || continue
+    [[ "$cname" == "caddy" || "$cimage" =~ ^(docker\.io/)?(library/)?caddy(:|@|$) ]] || continue
+    project="$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}' "$cid" 2>/dev/null || true)"
+    [[ "$project" != "$(basename "$ABS_DIR")" ]] || continue
+    OLD_CADDY="$cid"
+    OLD_CADDY_PROJECT_DIR="$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project.working_dir"}}' "$cid" 2>/dev/null || true)"
+    log "Found an existing Caddy container '$cname' (${cid:0:12}, compose project '${project:-none}')"
+    OLD_CADDYFILE_SRC="$(mount_source "$cid" /etc/caddy/Caddyfile)"
+    OLD_CADDY_DATA_SRC="$(mount_source "$cid" /data)"
+    OLD_CADDY_CONFIG_SRC="$(mount_source "$cid" /config)"
+    for m in "/etc/caddy/Caddyfile $OLD_CADDYFILE_SRC" "/data $OLD_CADDY_DATA_SRC" "/config $OLD_CADDY_CONFIG_SRC"; do
+      [[ "$m" == *" " ]] || log "  ${m%% *} is a ${m#* }"
+    done
+    tmp_caddyfile="$(mktemp)"
+    if [[ "${OLD_CADDYFILE_SRC%%:*}" == "bind" && -f "${OLD_CADDYFILE_SRC#*:}" ]]; then
+      cp "${OLD_CADDYFILE_SRC#*:}" "$tmp_caddyfile"
+    else
+      docker cp "$cid:/etc/caddy/Caddyfile" "$tmp_caddyfile" >/dev/null 2>&1 || true
+    fi
+    DETECTED_DOMAIN="$(caddyfile_domain "$tmp_caddyfile")"
+    DETECTED_EMAIL="$(caddyfile_email "$tmp_caddyfile")"
+    rm -f "$tmp_caddyfile"
+    [[ -n "$DETECTED_DOMAIN" ]] && log "  Caddyfile serves $DETECTED_DOMAIN${DETECTED_EMAIL:+ (ACME e-mail $DETECTED_EMAIL)}"
+    break
+  done < <(docker ps -a --format '{{.ID}} {{.Names}} {{.Image}}' 2>/dev/null || true)
+fi
+
 # ---------------------------------------------------------------------------
 # Configuration (.env is created once and never overwritten)
 # ---------------------------------------------------------------------------
+CADDY_DOMAIN_NEW="${DOMAIN_OVERRIDE:-$DETECTED_DOMAIN}"
+CADDY_EMAIL_NEW="${EMAIL_OVERRIDE:-$DETECTED_EMAIL}"
+CADDY_ENABLED_NEW="false"
+[[ $CADDY_DISABLED -eq 0 && -n "$CADDY_DOMAIN_NEW" ]] && CADDY_ENABLED_NEW="true"
+
+caddy_env_block() {
+  cat <<EOF
+
+# --- Caddy: HTTPS reverse proxy (Let's Encrypt) ---
+# Set CADDY_DOMAIN to the public host name (DNS must point to this server, ports 80 and 443
+# must be reachable) and CADDY_ENABLED=true; the site config is in caddy/Caddyfile.
+CADDY_ENABLED=${CADDY_ENABLED_NEW}
+CADDY_DOMAIN=${CADDY_DOMAIN_NEW}
+CADDY_EMAIL=${CADDY_EMAIL_NEW}
+CADDY_IMAGE=caddy
+CADDY_TAG=${CADDY_TAG_OVERRIDE:-2}
+CADDY_HTTP_PORT=80
+CADDY_HTTPS_PORT=443
+EOF
+}
+
 if [[ ! -f "$ENV_FILE" ]]; then
   AUDIOBOOKS="${AUDIOBOOKS_OVERRIDE:-${DETECTED_AUDIOBOOKS:-$ABS_DIR/audiobooks}}"
   ABS_PORT="${PORT_OVERRIDE:-13378}"
@@ -275,6 +357,7 @@ ENABLE_PROGRESGURU=true
 ENABLE_RADIOTEKA=true
 ENABLE_ROZHLAS=true
 EOF
+    caddy_env_block
   } >"$ENV_FILE"
   # Values imported from the old provider .env override the defaults above
   for kv in "${PROVIDER_IMPORT[@]}"; do
@@ -299,6 +382,16 @@ else
   [[ -n "$TAG_OVERRIDE" ]] && set_env_value ABS_TAG "$TAG_OVERRIDE"
   [[ -n "$PROVIDER_TAG_OVERRIDE" ]] && set_env_value PROVIDER_TAG "$PROVIDER_TAG_OVERRIDE"
   [[ "$PROVIDER_ENABLED" == "false" ]] && set_env_value PROVIDER_ENABLED false
+  if ! grep -q '^CADDY_ENABLED=' "$ENV_FILE"; then
+    # Installed before Caddy support existed: add the section (enabled only when a domain is known)
+    caddy_env_block >>"$ENV_FILE"
+    log "Added the Caddy section to $ENV_FILE (CADDY_ENABLED=$CADDY_ENABLED_NEW${CADDY_DOMAIN_NEW:+, domain $CADDY_DOMAIN_NEW})"
+  else
+    [[ -n "$DOMAIN_OVERRIDE" ]] && set_env_value CADDY_DOMAIN "$DOMAIN_OVERRIDE" && set_env_value CADDY_ENABLED true
+    [[ -n "$EMAIL_OVERRIDE" ]] && set_env_value CADDY_EMAIL "$EMAIL_OVERRIDE"
+    [[ -n "$CADDY_TAG_OVERRIDE" ]] && set_env_value CADDY_TAG "$CADDY_TAG_OVERRIDE"
+    [[ $CADDY_DISABLED -eq 1 ]] && set_env_value CADDY_ENABLED false
+  fi
 fi
 
 set -a
@@ -349,6 +442,41 @@ if [[ -n "$OLD_PROVIDER_DIR" && -f "$OLD_PROVIDER_DIR/docker-compose.yml" ]]; th
   mv "$OLD_PROVIDER_DIR" "$OLD_PROVIDER_DIR.migrated-$(date +%Y%m%d)" 2>/dev/null || true
 fi
 
+if [[ -n "$OLD_CADDY" ]]; then
+  CADDY_DIR="$ABS_DIR/caddy"
+  mkdir -p "$CADDY_DIR/data" "$CADDY_DIR/config"
+  log "Stopping the old Caddy container"
+  docker stop "$OLD_CADDY" >/dev/null 2>&1 || true
+  if [[ -f "$CADDY_DIR/Caddyfile" ]]; then
+    log "Keeping existing $CADDY_DIR/Caddyfile"
+  elif [[ "${OLD_CADDYFILE_SRC%%:*}" == "bind" && -f "${OLD_CADDYFILE_SRC#*:}" ]]; then
+    log "Copying ${OLD_CADDYFILE_SRC#*:} -> $CADDY_DIR/Caddyfile"
+    cp "${OLD_CADDYFILE_SRC#*:}" "$CADDY_DIR/Caddyfile"
+  elif docker cp "$OLD_CADDY:/etc/caddy/Caddyfile" "$CADDY_DIR/Caddyfile" >/dev/null 2>&1; then
+    log "Copied the Caddyfile from the old container -> $CADDY_DIR/Caddyfile"
+  fi
+  # Certificates and ACME account (/data) - reusing them avoids new Let's Encrypt issuances
+  OLD_CONTAINER_SAVE="$OLD_CONTAINER"; OLD_CONTAINER="$OLD_CADDY"
+  [[ -n "$OLD_CADDY_DATA_SRC" ]] && migrate_mount "$OLD_CADDY_DATA_SRC" "$CADDY_DIR/data" /data
+  [[ -n "$OLD_CADDY_CONFIG_SRC" ]] && migrate_mount "$OLD_CADDY_CONFIG_SRC" "$CADDY_DIR/config" /config
+  OLD_CONTAINER="$OLD_CONTAINER_SAVE"
+  if [[ "${CADDY_ENABLED:-false}" == "true" ]]; then
+    log "Removing the old Caddy container (its Caddyfile and certificates are now in $CADDY_DIR)"
+    docker rm -f "$OLD_CADDY" >/dev/null
+    if [[ -n "$OLD_CADDY_PROJECT_DIR" && -d "$OLD_CADDY_PROJECT_DIR" && "$OLD_CADDY_PROJECT_DIR" != "$ABS_DIR" ]]; then
+      proj_name="$(basename "$OLD_CADDY_PROJECT_DIR")"
+      if [[ -z "$(docker ps -aq --filter "label=com.docker.compose.project=$proj_name" 2>/dev/null)" ]]; then
+        log "The old compose project in $OLD_CADDY_PROJECT_DIR has no containers left, renaming it to $(basename "$OLD_CADDY_PROJECT_DIR").migrated-$(date +%Y%m%d)"
+        mv "$OLD_CADDY_PROJECT_DIR" "$OLD_CADDY_PROJECT_DIR.migrated-$(date +%Y%m%d)" 2>/dev/null || true
+      else
+        log "Other containers of the old compose project in $OLD_CADDY_PROJECT_DIR still exist, leaving the directory alone"
+      fi
+    fi
+  else
+    log "Caddy stays disabled (no domain known); the old container was only stopped. Re-run with --domain <host> to take it over."
+  fi
+fi
+
 # ---------------------------------------------------------------------------
 # Pull, start, verify
 # ---------------------------------------------------------------------------
@@ -362,6 +490,17 @@ Deployment finished.
   Configuration:  $ENV_FILE
   Audiobookshelf: http://<server>:${ABS_PORT:-13378}/   (library path inside the container: /audiobooks)
 EOF
+if [[ "${CADDY_ENABLED:-false}" == "true" ]]; then
+  cat <<EOF
+  HTTPS:          https://${CADDY_DOMAIN}/   (Caddy; site config $ABS_DIR/caddy/Caddyfile, certificates $ABS_DIR/caddy/data)
+                  DNS for ${CADDY_DOMAIN} must point here and ports ${CADDY_HTTP_PORT:-80}/${CADDY_HTTPS_PORT:-443} must be open;
+                  the first certificate is issued within about a minute: docker logs audiobookshelf-caddy
+EOF
+else
+  cat <<EOF
+  HTTPS:          not configured. Re-run with --domain <host> [--email <address>] to add Caddy.
+EOF
+fi
 if [[ "${PROVIDER_ENABLED:-true}" == "true" ]]; then
   cat <<EOF
   Provider:       http://<server>:${PROVIDER_PORT:-8000}/health
