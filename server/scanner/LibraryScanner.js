@@ -168,12 +168,14 @@ class LibraryScanner {
 
     const libraryItemIdsMissing = []
     let libraryItemsUpdated = []
+    // Scanned paths that belong to an existing library item are never taken by an inode match of another item
+    const existingLibraryItemPaths = new Set(existingLibraryItems.map((li) => li.path))
     for (const existingLibraryItem of existingLibraryItems) {
       // First try to find matching library item with exact file path
       let libraryItemData = libraryItemDataFound.find((lid) => lid.path === existingLibraryItem.path)
       if (!libraryItemData) {
         // Fallback to finding matching library item with matching inode value
-        libraryItemData = libraryItemDataFound.find((lid) => ItemToItemInoMatch(lid, existingLibraryItem) || ItemToFileInoMatch(lid, existingLibraryItem) || ItemToFileInoMatch(existingLibraryItem, lid))
+        libraryItemData = libraryItemDataFound.find((lid) => !existingLibraryItemPaths.has(lid.path) && (ItemToItemInoMatch(lid, existingLibraryItem) || ItemToFileInoMatch(lid, existingLibraryItem) || ItemToFileInoMatch(existingLibraryItem, lid)))
         if (libraryItemData) {
           libraryScan.addLog(LogLevel.INFO, `Library item with path "${existingLibraryItem.path}" was not found, but library item inode "${existingLibraryItem.ino}" was found at path "${libraryItemData.path}"`)
         }
@@ -311,7 +313,7 @@ class LibraryScanner {
     }
 
     const fileItems = await fileUtils.recurseFiles(folderPath)
-    const libraryItemGrouping = scanUtils.groupFileItemsIntoLibraryItemDirs(library.mediaType, fileItems, library.settings.audiobooksOnly)
+    const libraryItemGrouping = scanUtils.groupFileItemsIntoLibraryItemDirs(library.mediaType, fileItems, library.settings.audiobooksOnly, false, library.isEbookSplittingEnabled)
 
     if (!Object.keys(libraryItemGrouping).length) {
       Logger.error(`Root path has no media folders: ${folderPath}`)
@@ -323,16 +325,23 @@ class LibraryScanner {
       let isFile = false // item is not in a folder
       let libraryItemData = null
       let fileObjs = []
-      if (libraryItemPath === libraryItemGrouping[libraryItemPath]) {
-        // Media file in root only get title
-        libraryItemData = {
-          mediaMetadata: {
-            title: Path.basename(libraryItemPath, Path.extname(libraryItemPath))
-          },
-          path: Path.posix.join(folderPath, libraryItemPath),
-          relPath: libraryItemPath
+      if (isSingleMediaFile(libraryItemGrouping, libraryItemPath)) {
+        if (Path.posix.dirname(libraryItemPath) === '.') {
+          // Media file in root only get title
+          libraryItemData = {
+            mediaMetadata: {
+              title: Path.basename(libraryItemPath, Path.extname(libraryItemPath))
+            },
+            path: Path.posix.join(folderPath, libraryItemPath),
+            relPath: libraryItemPath
+          }
+        } else {
+          // Ebook split out of a directory shared with other books. Author and series come from
+          //   the directories above it and the title from the filename.
+          libraryItemData = scanUtils.getDataFromMediaFile(library.mediaType, folderPath, libraryItemPath)
         }
-        fileObjs = await scanUtils.buildLibraryFile(folderPath, [libraryItemPath])
+        const groupFilePaths = Array.isArray(libraryItemGrouping[libraryItemPath]) ? libraryItemGrouping[libraryItemPath] : [libraryItemPath]
+        fileObjs = await scanUtils.buildLibraryFile(folderPath, groupFilePaths)
         isFile = true
       } else {
         libraryItemData = scanUtils.getDataFromMediaDir(library.mediaType, folderPath, libraryItemPath)
@@ -498,6 +507,8 @@ class LibraryScanner {
     Logger.debug(`[Scanner] Scanning file update groups in folder "${folder.id}" of library "${library.name}"`)
     Logger.debug(`[Scanner] scanFolderUpdates fileUpdateGroup`, fileUpdateGroup)
 
+    await this.expandSplitEbookGroups(library, folder, fileUpdateGroup)
+
     // First pass - Remove files in parent dirs of items and remap the fileupdate group
     //    Test Case: Moving audio files from library item folder to author folder should trigger a re-scan of the item
     const updateGroup = { ...fileUpdateGroup }
@@ -552,7 +563,8 @@ class LibraryScanner {
     for (const itemDir in fileUpdateGroup) {
       const fullPath = Path.posix.join(fileUtils.filePathToPOSIX(folder.path), itemDir)
 
-      const itemDirParts = itemDir.split('/').slice(0, -1)
+      // A single media file library item is only matched by its own path, its parent directories belong to other items
+      const itemDirParts = isSingleMediaFile(fileUpdateGroup, itemDir) ? [] : itemDir.split('/').slice(0, -1)
 
       const potentialChildDirs = [fullPath]
       for (let i = 0; i < itemDirParts.length; i++) {
@@ -641,6 +653,115 @@ class LibraryScanner {
 
     return itemGroupingResults
   }
+
+  /**
+   * Expand update groups of directories that are split into one library item per ebook
+   *
+   * The watcher only reports the files that changed, so whether a directory holds several
+   * ebooks cannot be decided from the update group alone. The directory is re-read from disk
+   * and grouped the same way as in a full scan, then every changed file is rescanned as part
+   * of the library item it belongs to now. Without this a new ebook dropped into such a
+   * directory would be ignored as a change "in a parent directory of a library item".
+   *
+   * @param {import('../models/Library')} library
+   * @param {import('../models/LibraryFolder')} folder
+   * @param {Record<string, string[]|string>} fileUpdateGroup - modified in place
+   */
+  async expandSplitEbookGroups(library, folder, fileUpdateGroup) {
+    if (!library.isEbookSplittingEnabled) return
+
+    const folderPath = fileUtils.filePathToPOSIX(folder.path)
+    for (const itemDir of Object.keys(fileUpdateGroup)) {
+      if (isSingleMediaFile(fileUpdateGroup, itemDir)) continue
+
+      const changedFiles = fileUpdateGroup[itemDir]
+      const fullPath = Path.posix.join(folderPath, itemDir)
+      if (!(await fs.pathExists(fullPath))) {
+        // Directory is gone. Add each removed file as its own group so that ebook library items
+        //   split out of it are found by path and marked missing. The directory group is kept
+        //   in case the directory itself was a library item.
+        for (const changedFile of changedFiles) {
+          if (changedFile.includes('/')) continue
+          const relPath = Path.posix.join(itemDir, changedFile)
+          fileUpdateGroup[relPath] = [relPath]
+        }
+        continue
+      }
+
+      // Group the current directory content the same way the full scan does. Subdirectories are
+      //   included because a directory with a single ebook is only split when more ebooks are below it.
+      const itemDirDepth = itemDir.split('/').length
+      const fileItems = (await fileUtils.recurseFiles(fullPath)).map((item) => ({
+        ...item,
+        reldirpath: item.reldirpath ? Path.posix.join(itemDir, item.reldirpath) : itemDir,
+        deep: item.deep + itemDirDepth
+      }))
+      const currentGrouping = scanUtils.groupFileItemsIntoLibraryItemDirs(library.mediaType, fileItems, !!library.settings?.audiobooksOnly, false, true)
+      if (currentGrouping[itemDir]) {
+        // Directory is a single library item. If it was split until now (ebook library items directly in it
+        //   exist) rescan it with its full content so one of them is converted into the directory item, and
+        //   let the removed ones be marked missing.
+        const fileLibraryItems = await Database.libraryItemModel.findAll({
+          attributes: ['path'],
+          where: {
+            libraryId: library.id,
+            isFile: true,
+            path: {
+              [sequelize.Op.startsWith]: `${fullPath}/`
+            }
+          }
+        })
+        const directFileItemPaths = fileLibraryItems.map((li) => li.path).filter((itemPath) => Path.posix.dirname(itemPath) === fullPath)
+        if (directFileItemPaths.length) {
+          fileUpdateGroup[itemDir] = currentGrouping[itemDir]
+          for (const itemPath of directFileItemPaths) {
+            const relPath = Path.posix.join(itemDir, Path.basename(itemPath))
+            if (!fileItems.some((item) => Path.posix.join(item.reldirpath, item.name) === relPath)) fileUpdateGroup[relPath] = [relPath]
+          }
+        }
+        continue
+      }
+
+      // The ebook library items directly in this directory
+      const splitKeys = Object.keys(currentGrouping).filter((key) => Path.posix.dirname(key) === itemDir)
+      if (!splitKeys.length) continue // No ebooks directly in this directory, e.g. only a cover or a subdirectory changed
+
+      Logger.debug(`[LibraryScanner] Directory "${itemDir}" is split into ${splitKeys.length} ebook library items`)
+      delete fileUpdateGroup[itemDir]
+
+      // If the directory itself is a library item (it held a single book until now) rescan every
+      //   book in it so the directory item is converted into one of the file items
+      const dirLibraryItem = await Database.libraryItemModel.findOne({
+        attributes: ['id'],
+        where: {
+          libraryId: library.id,
+          path: fullPath
+        }
+      })
+      if (dirLibraryItem) {
+        for (const key of splitKeys) fileUpdateGroup[key] = currentGrouping[key]
+      }
+
+      for (const changedFile of changedFiles) {
+        const relPath = Path.posix.join(itemDir, changedFile)
+        const relDir = Path.posix.dirname(relPath)
+        const basename = Path.basename(relPath, Path.extname(relPath))
+        // The library item the file belongs to: an ebook of the same name in the same directory, or the directory item above it
+        const groupKey = Object.keys(currentGrouping).find((key) => {
+          if (isSingleMediaFile(currentGrouping, key)) return Path.posix.dirname(key) === relDir && Path.basename(key, Path.extname(key)) === basename
+          return relPath.startsWith(`${key}/`)
+        })
+        if (groupKey) {
+          fileUpdateGroup[groupKey] = currentGrouping[groupKey]
+        } else if (!fileItems.some((item) => Path.posix.join(item.reldirpath, item.name) === relPath)) {
+          // File is gone and no library item is left for it, one at this path gets marked missing
+          fileUpdateGroup[relPath] = [relPath]
+        } else {
+          Logger.debug(`[LibraryScanner] File "${relPath}" does not belong to any library item in the split directory "${itemDir}" - ignoring`)
+        }
+      }
+    }
+  }
 }
 module.exports = new LibraryScanner()
 
@@ -653,11 +774,14 @@ function ItemToItemInoMatch(libraryItem1, libraryItem2) {
 }
 
 function hasAudioFiles(fileUpdateGroup, itemDir) {
-  return isSingleMediaFile(fileUpdateGroup, itemDir) ? scanUtils.checkFilepathIsAudioFile(fileUpdateGroup[itemDir]) : fileUpdateGroup[itemDir].some(scanUtils.checkFilepathIsAudioFile)
+  const group = fileUpdateGroup[itemDir]
+  return Array.isArray(group) ? group.some(scanUtils.checkFilepathIsAudioFile) : scanUtils.checkFilepathIsAudioFile(group)
 }
 
 function isSingleMediaFile(fileUpdateGroup, itemDir) {
-  return itemDir === fileUpdateGroup[itemDir]
+  const group = fileUpdateGroup[itemDir]
+  // Ebook files split out of a shared directory are groups whose first entry is the key itself
+  return Array.isArray(group) ? group[0] === itemDir : itemDir === group
 }
 
 async function findLibraryItemByItemToItemInoMatch(libraryId, fullPath) {

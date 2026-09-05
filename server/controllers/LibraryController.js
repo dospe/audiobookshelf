@@ -1450,7 +1450,8 @@ class LibraryController {
     Logger.info(`[LibraryController] User "${req.user.username}" requested download for items "${itemIds}"`)
 
     const filename = `LibraryItems-${Date.now()}.zip`
-    const pathObjects = libraryItems.map((li) => ({ path: li.path, isFile: li.isFile }))
+    // A single media file library item can own more files (other ebook formats, opf, cover)
+    const pathObjects = libraryItems.flatMap((li) => (li.isFile && li.libraryFiles?.length > 1 ? li.libraryFiles.map((lf) => ({ path: lf.metadata.path, isFile: true })) : [{ path: li.path, isFile: li.isFile }]))
 
     if (!pathObjects.length) {
       Logger.warn(`[LibraryController] No library items found for ids "${itemIds}"`)

@@ -1,4 +1,5 @@
 const Path = require('path')
+const fs = require('../libs/fsExtra')
 const { LogLevel, ScanResult } = require('../utils/constants')
 
 const fileUtils = require('../utils/fileUtils')
@@ -58,7 +59,7 @@ class LibraryItemScanner {
 
     const libraryItemPath = updateLibraryItemDetails?.path || fileUtils.filePathToPOSIX(libraryItem.path)
     const folder = library.libraryFolders[0]
-    const libraryItemScanData = await this.getLibraryItemScanData(libraryItemPath, library, folder, updateLibraryItemDetails?.isFile || false)
+    const libraryItemScanData = await this.getLibraryItemScanData(libraryItemPath, library, folder, updateLibraryItemDetails?.isFile ?? libraryItem.isFile)
 
     let libraryItemDataUpdated = await libraryItemScanData.checkLibraryItemData(libraryItem, scanLogger)
 
@@ -107,7 +108,23 @@ class LibraryItemScanner {
 
     let fileItems = []
 
-    if (isSingleMediaItem) {
+    if (isSingleMediaItem && Path.posix.dirname(libraryItemDir) !== '.') {
+      // Ebook split out of a directory shared with other books. The item owns every file in that
+      //   directory sharing its filename without extension (e.g. "Book.epub", "Book.pdf", "Book.opf").
+      const itemDirPath = Path.posix.dirname(libraryItemPath)
+      const itemRelDir = Path.posix.dirname(libraryItemDir)
+      const basename = Path.basename(libraryItemDir, Path.extname(libraryItemDir))
+      const dirEntries = await fs.readdir(itemDirPath, { withFileTypes: true }).catch(() => [])
+      fileItems = dirEntries
+        .filter((entry) => entry.isFile() && Path.basename(entry.name, Path.extname(entry.name)) === basename)
+        .map((entry) => ({
+          fullpath: Path.posix.join(itemDirPath, entry.name),
+          path: Path.posix.join(itemRelDir, entry.name) // relative to the library folder
+        }))
+      // The media file the item points at goes first so it stays the primary ebook
+      fileItems.sort((a, b) => (a.fullpath === libraryItemPath ? -1 : b.fullpath === libraryItemPath ? 1 : 0))
+      libraryItemData = scanUtils.getDataFromMediaFile(library.mediaType, libraryFolderPath, libraryItemDir)
+    } else if (isSingleMediaItem) {
       // Single media item in root of folder
       fileItems = [
         {

@@ -616,6 +616,8 @@
   "LabelSettingsSkipMatchingBooksWithISBN": "Přeskočit párování knih, které již mají ISBN",
   "LabelSettingsSortingIgnorePrefixes": "Ignorovat předpony při třídění",
   "LabelSettingsSortingIgnorePrefixesHelp": "tj. pro předponu \"the\" název knihy \"Název knihy\" by se třídil jako \"Název knihy, The\"",
+  "LabelSettingsSplitEbooksByFile": "Rozdělit složky s více e-knihami na samostatné knihy",
+  "LabelSettingsSplitEbooksByFileHelp": "Pokud složka neobsahuje žádné audio soubory a jsou v ní dvě a více e-knih, každá e-kniha se stane samostatnou knihou. Soubory se stejným názvem (Kniha.epub, Kniha.pdf, Kniha.opf, Kniha.jpg) zůstanou pohromadě jako jedna kniha. Autor a série se čtou z názvů nadřazených složek. Nemá vliv, pokud je zapnuto Pouze audioknihy.",
   "LabelSettingsSquareBookCovers": "Použít čtvercové obálky knih",
   "LabelSettingsSquareBookCoversHelp": "Preferovat použití čtvercových obálek před standardními obálkami 1.6:1",
   "LabelSettingsStoreCoversWithItem": "Uložit obálky s položkou",

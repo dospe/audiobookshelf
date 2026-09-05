@@ -9,6 +9,7 @@ const Logger = require('../Logger')
  * @property {boolean} skipMatchingMediaWithIsbn
  * @property {string} autoScanCronExpression
  * @property {boolean} audiobooksOnly
+ * @property {boolean} splitEbooksByFile Create one library item per ebook when a directory holds several ebooks and no audio files
  * @property {boolean} hideSingleBookSeries Do not show series that only have 1 book
  * @property {boolean} onlyShowLaterBooksInContinueSeries Skip showing books that are earlier than the max sequence read
  * @property {string[]} metadataPrecedence
@@ -71,6 +72,7 @@ class Library extends Model {
         skipMatchingMediaWithAsin: false,
         skipMatchingMediaWithIsbn: false,
         audiobooksOnly: false,
+        splitEbooksByFile: true,
         epubsAllowScriptedContent: false,
         hideSingleBookSeries: false,
         onlyShowLaterBooksInContinueSeries: false,
@@ -83,6 +85,16 @@ class Library extends Model {
 
   static get defaultMetadataPrecedence() {
     return ['folderStructure', 'audioMetatags', 'nfoFile', 'txtFiles', 'opfFile', 'absMetadata']
+  }
+
+  /**
+   * Whether directories holding several ebooks are split into one library item per ebook.
+   * Enabled unless explicitly turned off, so libraries created before the setting existed get it too.
+   *
+   * @returns {boolean}
+   */
+  get isEbookSplittingEnabled() {
+    return this.mediaType === 'book' && !this.settings?.audiobooksOnly && this.settings?.splitEbooksByFile !== false
   }
 
   /**
