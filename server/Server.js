@@ -89,6 +89,9 @@ class Server {
     }
     global.PodcastDownloadTimeout = toNumber(process.env.PODCAST_DOWNLOAD_TIMEOUT, 30000)
     global.MaxFailedEpisodeChecks = toNumber(process.env.MAX_FAILED_EPISODE_CHECKS, 24)
+    // Custom metadata providers may aggregate several slow upstream sources, so they get a
+    // longer response timeout than the built-in providers
+    global.CustomMetadataProviderTimeout = toNumber(process.env.CUSTOM_METADATA_PROVIDER_TIMEOUT, 30000)
 
     if (!fs.pathExistsSync(global.ConfigPath)) {
       fs.mkdirSync(global.ConfigPath)

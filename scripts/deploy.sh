@@ -474,6 +474,9 @@ ABS_METADATA_DIR=${ABS_DIR}/metadata
 ABS_BACKUP_DIR=${ABS_DIR}/backups
 ABS_BACKUP_KEEP=7
 ABS_TZ=Europe/Prague
+# How long (ms) the server waits for a custom metadata provider response.
+# Keep it above the provider's own REQUEST_TIMEOUT_SECONDS/SCRAPER_TIMEOUT_SECONDS.
+CUSTOM_METADATA_PROVIDER_TIMEOUT=30000
 
 # --- Czech metadata provider ---
 PROVIDER_ENABLED=${PROVIDER_ENABLED}
@@ -530,6 +533,15 @@ else
   [[ -n "$TAG_OVERRIDE" ]] && set_env_value ABS_TAG "$TAG_OVERRIDE"
   [[ -n "$PROVIDER_TAG_OVERRIDE" ]] && set_env_value PROVIDER_TAG "$PROVIDER_TAG_OVERRIDE"
   [[ "$PROVIDER_ENABLED" == "false" ]] && set_env_value PROVIDER_ENABLED false
+  if ! grep -q '^CUSTOM_METADATA_PROVIDER_TIMEOUT=' "$ENV_FILE"; then
+    # Installed before the metadata provider timeout was configurable
+    {
+      printf '\n# How long (ms) the server waits for a custom metadata provider response.\n'
+      printf '# Keep it above the provider'"'"'s own REQUEST_TIMEOUT_SECONDS/SCRAPER_TIMEOUT_SECONDS.\n'
+      printf 'CUSTOM_METADATA_PROVIDER_TIMEOUT=30000\n'
+    } >>"$ENV_FILE"
+    log "Added CUSTOM_METADATA_PROVIDER_TIMEOUT=30000 to $ENV_FILE"
+  fi
   if ! grep -q '^CADDY_ENABLED=' "$ENV_FILE"; then
     # Installed before Caddy support existed: add the section (enabled only when a domain is known)
     caddy_env_block >>"$ENV_FILE"

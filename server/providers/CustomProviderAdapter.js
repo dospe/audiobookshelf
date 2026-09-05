@@ -4,9 +4,19 @@ const Logger = require('../Logger')
 const htmlSanitizer = require('../utils/htmlSanitizer')
 
 class CustomProviderAdapter {
-  #responseTimeout = 10000
+  #responseTimeout = 30000
 
   constructor() {}
+
+  /**
+   * Response timeout in ms, set from the CUSTOM_METADATA_PROVIDER_TIMEOUT env var
+   * @returns {number}
+   */
+  get responseTimeout() {
+    const timeout = global.CustomMetadataProviderTimeout
+    if (!timeout || isNaN(timeout)) return this.#responseTimeout
+    return timeout
+  }
 
   /**
    *
@@ -18,8 +28,8 @@ class CustomProviderAdapter {
    * @param {number} [timeout] response timeout in ms
    * @returns {Promise<Object[]>}
    */
-  async search(title, author, isbn, providerSlug, mediaType, timeout = this.#responseTimeout) {
-    if (!timeout || isNaN(timeout)) timeout = this.#responseTimeout
+  async search(title, author, isbn, providerSlug, mediaType, timeout = this.responseTimeout) {
+    if (!timeout || isNaN(timeout)) timeout = this.responseTimeout
 
     const providerId = providerSlug.split('custom-')[1]
     const provider = await Database.customMetadataProviderModel.findByPk(providerId)

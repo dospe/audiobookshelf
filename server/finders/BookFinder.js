@@ -204,7 +204,8 @@ class BookFinder {
    */
   async getCustomProviderResults(title, author, isbn, providerSlug) {
     try {
-      const books = await this.customProviderAdapter.search(title, author, isbn, providerSlug, 'book', this.#providerResponseTimeout)
+      // Custom providers use their own (longer, env-configurable) timeout, see CUSTOM_METADATA_PROVIDER_TIMEOUT
+      const books = await this.customProviderAdapter.search(title, author, isbn, providerSlug, 'book')
       if (this.verbose) Logger.debug(`Custom provider '${providerSlug}' Search Results: ${books.length || 0}`)
       return books
     } catch (error) {
