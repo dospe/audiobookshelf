@@ -33,44 +33,37 @@ Souběžné spuštění hlídá zámek `.update.lock`, druhá instance skončí 
 - `curl`, `tar`, `flock` (součást `util-linux`, na běžných distribucích je).
 - Uživatel, který skript spouští, musí smět používat Docker (skupina `docker`
   nebo `sudo`).
-- Síťový přístup na `ghcr.io` a token GitHubu (viz další kapitola).
+- Síťový přístup na `ghcr.io`. Balíček s image je veřejný, přihlášení k registru není potřeba.
 
 Image se staví automaticky workflow „Build and Push Docker Image“ při každém
 pushi do `master`, který mění `client/`, `server/`, `index.js` nebo
 `package.json`. Tagy: `latest` a `edge` (master), `vX.Y.Z` (verze).
 
-## Přístupový token (repozitář i balíček jsou soukromé)
+## Přístup k image a ke skriptu
 
-Repozitář `dospe/audiobookshelf` i balíček `ghcr.io/dospe/audiobookshelf`
-jsou soukromé, takže server potřebuje token GitHubu:
+- **Image** `ghcr.io/dospe/audiobookshelf` je veřejný balíček. `docker pull`,
+  `docker manifest inspect` (volba `--check`) i compose fungují bez
+  přihlášení; na serveru není potřeba žádný token ani `docker login`.
+- **Repozitář** `dospe/audiobookshelf` je soukromý. Týká se to jen stažení
+  samotného skriptu `update-server.sh` (a tohoto návodu); vlastní aktualizace
+  serveru repozitář nepotřebuje. Skript získáte jedním ze dvou způsobů:
+  1. zkopírováním přes `scp` z počítače, kde máte repozitář naklonovaný, nebo
+  2. stažením přes `curl` s tokenem GitHubu: Settings → Developer settings →
+     Personal access tokens → Tokens (classic) → Generate new token
+     s oprávněním `repo`. Token se použije jen jednorázově při stažení,
+     na serveru ho ukládat nemusíte.
 
-1. GitHub → Settings → Developer settings → Personal access tokens →
-   **Tokens (classic)** → Generate new token. Zaškrtněte `read:packages`
-   (stažení image) a `repo` (stažení skriptu ze soukromého repozitáře).
-   Fine-grained tokeny zatím k balíčkům na ghcr přístup nedávají, použijte
-   classic.
-2. Token si uložte, GitHub ho zobrazí jen jednou.
-3. Na serveru se přihlaste k ghcr **stejným uživatelem, který bude skript
-   spouštět** (přihlášení se ukládá do `~/.docker/config.json` daného
-   uživatele; při spouštění přes `sudo` nebo z root cronu je to `root`):
-
-```bash
-echo "<token>" | sudo docker login ghcr.io -u dospe --password-stdin
-```
-
-Přihlášení je trvalé, opakuje se jen po změně tokenu. `docker pull`,
-`docker manifest inspect` (volba `--check`) i compose pak token používají
-automaticky.
-
-> Alternativa bez tokenu na serveru: nastavit balíček `audiobookshelf` jako
-> public (GitHub → Packages → Package settings → Danger zone → Change
-> visibility). Repozitář může zůstat soukromý, viditelnost balíčku je
-> nezávislá.
+> Kdyby byl balíček později přepnutý zpět na private, přidejte tokenu
+> oprávnění `read:packages` a na serveru se přihlaste stejným uživatelem,
+> který skript spouští (u `sudo` a cronu je to root):
+> `echo "<token>" | sudo docker login ghcr.io -u dospe --password-stdin`.
+> Přihlášení se ukládá do `~/.docker/config.json` a je trvalé.
 
 ## První instalace
 
 ```bash
-# 1. Skript stáhněte ze soukromého repozitáře (token s oprávněním repo)
+# 1. Skript stáhněte ze soukromého repozitáře (token s oprávněním repo),
+#    nebo ho na server zkopírujte přes scp z naklonovaného repozitáře
 sudo mkdir -p /opt/audiobookshelf
 sudo curl -fsSL -H "Authorization: token <token>" \
   https://raw.githubusercontent.com/dospe/audiobookshelf/master/scripts/update-server.sh \
@@ -81,8 +74,14 @@ sudo chmod +x /opt/audiobookshelf/update-server.sh
 sudo /opt/audiobookshelf/update-server.sh
 ```
 
-Skript můžete na server také zkopírovat přes `scp` z naklonovaného
-repozitáře; obsahuje vše potřebné, jiné soubory z repa nepotřebuje.
+Varianta přes `scp` (bez tokenu):
+
+```bash
+scp scripts/update-server.sh <uživatel>@<server>:/tmp/
+sudo install -m 755 /tmp/update-server.sh /opt/audiobookshelf/update-server.sh
+```
+
+Skript obsahuje vše potřebné, jiné soubory z repozitáře nepotřebuje.
 
 Skript při prvním běhu jen vytvoří `/opt/audiobookshelf/.env` a skončí, aby
 se nic nenainstalovalo s nesprávnými cestami. Otevřete ho a upravte cesty a
@@ -294,14 +293,14 @@ neotevře.
 
 | Příznak | Příčina a řešení |
 | --- | --- |
-| `pull failed` / `denied` / `unauthorized` | Balíček na ghcr je soukromý a uživatel, který skript spouští, není přihlášený. Spusťte `docker login ghcr.io` jako tento uživatel (u `sudo` a cronu jako root) s tokenem `read:packages`, viz „Přístupový token“. Token mohl také vypršet. |
+| `pull failed` / `denied` / `unauthorized` | Balíček je veřejný, takže nejčastěji jde o výpadek sítě nebo ghcr.io; zkuste znovu. Pokud byl balíček přepnutý na private, přihlaste se podle poznámky v kapitole „Přístup k image a ke skriptu“. |
 | `curl: (404)` při stahování skriptu | Repozitář je soukromý; přidejte hlavičku `Authorization: token <token>` (oprávnění `repo`) nebo skript zkopírujte přes `scp`. |
 | `cannot talk to the Docker daemon` | Spusťte se `sudo`, nebo přidejte uživatele do skupiny `docker` a znovu se přihlaste. |
 | `another update-server.sh is already running` | Běží jiná instance (cron). Počkejte, nebo smažte `.update.lock`, pokud proces prokazatelně neběží. |
 | Server nenaběhne do 120 s | Podívejte se do vypsaného logu. Nejčastěji obsazený port (`ABS_PORT`) nebo práva k `config`/`metadata` (`ABS_PUID`/`ABS_PGID`). |
 | Knihovna je prázdná po přechodu z oficiálního image | `ABS_CONFIG_DIR` míří jinam než původní config. Zkontrolujte cesty v `.env` a `--force`. |
 | Nové formáty se v knihovně neukazují | Spusťte sken knihovny (Nastavení knihovny → Scan). Kontroluje se přípona souboru. |
-| `--check` hlásí chybu manifestu | `docker manifest inspect` potřebuje síť a přístup k balíčku; viz první řádek. |
+| `--check` hlásí chybu manifestu | `docker manifest inspect` potřebuje síť; zkontrolujte připojení k ghcr.io. |
 
 ## Kde je co
 
