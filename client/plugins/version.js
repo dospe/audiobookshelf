@@ -49,6 +49,8 @@ function getReleases() {
 }
 
 export const currentVersion = packagejson.version
+// Fork builds carry a suffix (e.g. 2.36.0-dospe.1), upstream releases are matched by the base version
+const upstreamVersion = packagejson.version.split(/[-+]/)[0]
 
 export async function checkForUpdate() {
   if (!packagejson.version) {
@@ -61,7 +63,7 @@ export async function checkForUpdate() {
     return null
   }
 
-  const currentVersion = releases.find((release) => release.version == packagejson.version)
+  const currentVersion = releases.find((release) => release.version == upstreamVersion)
   if (!currentVersion) {
     console.error('Current version not found in releases')
     return null

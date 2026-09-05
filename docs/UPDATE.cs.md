@@ -165,7 +165,7 @@ se nikdy nepřepíše.
 ```dotenv
 # --- Audiobookshelf server (fork image) ---
 ABS_IMAGE=ghcr.io/dospe/audiobookshelf
-ABS_TAG=latest                      # edge, vX.Y.Z, nebo latest@sha256:<digest>
+ABS_TAG=latest                      # edge, verze forku (např. 2.36.0-dospe.1), nebo latest@sha256:<digest>
 ABS_PORT=13378
 ABS_AUDIOBOOKS_DIR=/opt/audio/audiobooks
 ABS_CONFIG_DIR=/opt/audio/config
