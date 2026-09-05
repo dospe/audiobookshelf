@@ -8,13 +8,14 @@ skriptů z `scripts/`:
 | `deploy.sh` | První instalace nebo znovunasazení: založí `/opt/audio`, převezme data ze staré instalace, vytvoří konfiguraci a stack spustí. Umí i vzdálený režim přes SSH. |
 | `update-server.sh` | Běžná idempotentní aktualizace: stáhne nové image, zazálohuje config, znovu vytvoří jen změněné kontejnery, ověří health check. Vhodné pro cron. |
 
-Stack tvoří tři služby v jednom Docker Compose projektu:
+Stack tvoří až čtyři služby v jednom Docker Compose projektu:
 
 | Služba | Image | Port na hostiteli | Poznámka |
 | --- | --- | --- | --- |
 | `audiobookshelf` | `ghcr.io/dospe/audiobookshelf` (tento fork) | `ABS_PORT`, výchozí 13378 | web UI a API |
 | `provider` | `ghcr.io/stecik/audiobookshelf_czech_metadata` | `PROVIDER_PORT`, výchozí 8000 | český metadata provider; ABS ho volá uvnitř compose sítě jako `http://provider:8000` |
 | `caddy` | `caddy:2` | 80 a 443 (`CADDY_HTTP_PORT`, `CADDY_HTTPS_PORT`) | HTTPS reverzní proxy pro `CADDY_DOMAIN` s automatickým certifikátem Let's Encrypt; nasazuje se jen s nastavenou doménou |
+| `rclone` | `rclone/rclone` | žádný | FUSE mount cloudového úložiště (`RCLONE_REMOTE`, např. Google Drive) na `RCLONE_MOUNT_POINT`; Audiobookshelf ho vidí jako `/media`; nasazuje se jen s nastaveným remote |
 
 Všechny image jsou veřejné, na serveru není potřeba žádné přihlášení k registru.
 
@@ -32,6 +33,8 @@ Všechny image jsou veřejné, na serveru není potřeba žádné přihlášení
 | `/opt/audio/caddy/Caddyfile` | konfigurace HTTPS proxy; vznikne při nasazení (převzatá ze staré instalace nebo vygenerovaná z `--domain`), dál se edituje ručně a nepřepisuje se |
 | `/opt/audio/caddy/data` | certifikáty a účet Let's Encrypt (zálohovat spolu s configem; při ztrátě si Caddy vyžádá nové) |
 | `/opt/audio/caddy/config` | interní stav Caddy |
+| `/opt/audio/rclone/config/rclone.conf` | přihlášení k cloudovému remote (vytvoří `rclone config`, při migraci se převezme; zálohovat, obsahuje token) |
+| `/opt/audio/rclone/cache` | VFS cache rclone (až `--vfs-cache-max-size`, může obsahovat ještě nenahrané soubory; při migraci se přesouvá, ne kopíruje) |
 | `/opt/audio/.update.lock` | zámek proti souběhu aktualizací |
 
 ## Požadavky
@@ -41,6 +44,7 @@ Všechny image jsou veřejné, na serveru není potřeba žádné přihlášení
 - Root nebo `sudo` (skripty zapisují do `/opt/audio`; `deploy.sh` se sám znovu spustí přes `sudo`).
 - Síťový přístup na `ghcr.io` a `docker.io` (image Caddy).
 - Pro HTTPS: DNS záznam domény míří na server a porty 80 a 443 jsou zvenku dostupné (Let's Encrypt ověřuje přes HTTP na portu 80). Na portech nesmí běžet nic jiného (jiná Caddy, nginx, Apache).
+- Pro rclone: jádro s FUSE (`/dev/fuse`), přípojný bod na sdíleném mountu (výchozí systemd má `/` jako `shared`; jinak `mount --make-rshared /`).
 
 Skripty jsou v soukromém repozitáři `dospe/audiobookshelf`, takže je na server
 dostanete buď přes `scp` z naklonovaného repozitáře, nebo přes `curl` s classic
@@ -90,6 +94,15 @@ sudo /opt/audio/deploy.sh
      (v domovském adresáři uživatele i roota), převezme jeho `.env`
      (`HOST_PORT` → `PROVIDER_PORT`, token, `ENABLE_*` …), starý compose
      projekt zastaví a složku přejmenuje na `abs-czech-metadata.migrated-<datum>`;
+   - u starého kontejneru `audiobookshelf` převezme i **ostatní bind mounty**
+     (`/media` → `ABS_MEDIA_DIR`, cokoli dalšího → `ABS_EXTRA_MOUNTS` včetně
+     `ro` a propagace) a uživatele, pod kterým běžel (`ABS_UID`/`ABS_GID`);
+   - najde starý kontejner rclone (název `rclone*` nebo image `rclone/rclone`)
+     z jiného compose projektu, z jeho příkazu vyčte remote a volby mountu, ze
+     starého `.env` UID/GID uživatele serveru, zkopíruje `rclone.conf`, VFS
+     cache **přesune** (může obsahovat nenahrané soubory), kontejner odstraní
+     a mount znovu vytvoří v novém stacku. Tento krok proběhne i nad existující
+     instalací v `/opt/audio`, která ještě sekci `RCLONE_*` v `.env` nemá;
    - najde starý kontejner Caddy (název `caddy` nebo image `caddy:*`) z
      jiného compose projektu, z jeho Caddyfile vyčte doménu a e-mail pro
      Let's Encrypt, Caddyfile i certifikáty (`/data`, `/config`; z bind mountu
@@ -99,11 +112,12 @@ sudo /opt/audio/deploy.sh
      i nad existující instalací v `/opt/audio`, která ještě sekci `CADDY_*`
      v `.env` nemá.
 3. Vytvoří `/opt/audio/.env` (výchozí hodnoty + zjištěné cesty + importované
-   hodnoty provideru + doména Caddy). Při dalších bězích `.env` zachová a jen
-   do něj promítne volby z příkazové řádky.
+   hodnoty provideru + doména Caddy + remote rclone + uživatel). Při dalších
+   bězích `.env` zachová a jen do něj promítne volby z příkazové řádky.
 4. Spustí `update-server.sh --force`: zapíše compose, vytvoří chybějící
-   `caddy/Caddyfile`, stáhne image, vytvoří kontejnery a počká na
-   `/healthcheck` (ABS), `/health` (provider) a health check Caddy.
+   `caddy/Caddyfile`, při nastaveném `ABS_UID` převede vlastnictví `config`
+   a `metadata`, stáhne image, vytvoří kontejnery a počká na `/healthcheck`
+   (ABS), `/health` (provider) a health checky Caddy a rclone (mount existuje).
 
 Kopírování dat probíhá jen do prázdné cílové složky; existující obsah
 `/opt/audio/config`, `/opt/audio/caddy/Caddyfile` ani `/opt/audio/caddy/data`
@@ -120,17 +134,24 @@ se nikdy nepřepíše.
 | `--provider-port N` | Port provideru (výchozí 8000). |
 | `--domain HOST` | Veřejná doména pro HTTPS (`CADDY_DOMAIN`, zapne `CADDY_ENABLED=true`). Bez ní se doména bere ze starého Caddyfile; když není známa žádná, Caddy se nenasadí. |
 | `--email ADRESA` | Kontaktní e-mail pro Let's Encrypt (`CADDY_EMAIL`; jinak ze starého Caddyfile). |
-| `--tag TAG`, `--provider-tag TAG`, `--caddy-tag TAG` | Tagy image (výchozí `latest`, `latest`, `2`). |
+| `--rclone-remote R` | Remote k připojení, např. `gdrive:Audiobookshelf` (`RCLONE_REMOTE`, zapne `RCLONE_ENABLED=true`). Bez něj se bere ze starého kontejneru rclone; když není znám, rclone se nenasadí. |
+| `--mount-point PATH` | Přípojný bod na hostiteli (`RCLONE_MOUNT_POINT`, výchozí `/mnt/gdrive` nebo ten starý). |
+| `--media-dir PATH` | Složka hostitele viditelná v ABS jako `/media` (`ABS_MEDIA_DIR`; výchozí přípojný bod rclone, nebo `/media` starého kontejneru). |
+| `--user UID:GID` | Uživatel, pod kterým ABS poběží (`ABS_UID`/`ABS_GID`; výchozí ze starého kontejneru či starého `.env`, jinak root). |
+| `--tag TAG`, `--provider-tag TAG`, `--caddy-tag TAG`, `--rclone-tag TAG` | Tagy image (výchozí `latest`, `latest`, `2`, `latest`). |
 | `--no-provider` | Provider nenasazovat (`PROVIDER_ENABLED=false`). |
 | `--no-caddy` | Caddy nenasazovat (`CADDY_ENABLED=false`); starý kontejner Caddy se pak jen zastaví. |
+| `--no-rclone` | rclone nenasazovat (`RCLONE_ENABLED=false`); starý kontejner rclone zůstane běžet. |
 | `--no-migrate` | Nehledat starou instalaci. |
 
 ### Po instalaci
 
 1. Otevřete `https://<doména>/` (s Caddy) nebo `http://<server>:13378/`. Při
    migraci se přihlásíte původními účty; při čisté instalaci projdete průvodcem.
-2. Knihovna má uvnitř kontejneru cestu `/audiobooks`; při čisté instalaci ji
-   v ABS založte s touto cestou.
+2. Knihovna má uvnitř kontejneru cestu `/audiobooks`, cloudové úložiště přes
+   rclone cestu `/media` (např. `/media/Audioknihy`, `/media/Eknihy`); při
+   čisté instalaci knihovny v ABS založte s těmito cestami. Po migraci
+   spusťte sken knihoven, položky označené jako Missing se vrátí.
 3. Provider přidejte v ABS: Nastavení → Metadata Tools → Custom Metadata
    Providers → Add, Media Type `Book`, URL `http://provider:8000`.
    Authorization header vyplňte jen tehdy, když je v `.env` nastaven
@@ -152,8 +173,6 @@ ABS_METADATA_DIR=/opt/audio/metadata
 ABS_BACKUP_DIR=/opt/audio/backups
 ABS_BACKUP_KEEP=7
 ABS_TZ=Europe/Prague
-ABS_PUID=1000                       # id -u uživatele s právy ke knihovně
-ABS_PGID=1000
 
 # --- Czech metadata provider ---
 PROVIDER_ENABLED=true
@@ -168,6 +187,22 @@ SCRAPER_USER_AGENT=
 ENABLE_ALZA=true
 # ... ENABLE_<zdroj>=true/false pro každý obchod, ENABLE_DATABAZEKNIH=false
 
+# --- Storage and user of the Audiobookshelf container ---
+ABS_UID=1001                        # prázdné = root; config a metadata se převedou na tohoto uživatele
+ABS_GID=1001
+ABS_MEDIA_DIR=/mnt/gdrive           # složka hostitele jako /media (propagace rslave); prázdné = bez mountu
+ABS_EXTRA_MOUNTS="/srv/knihy:/mnt/knihy:ro"   # další bind mounty host:kontejner[:ro][:rslave], oddělené mezerou
+
+# --- rclone: FUSE mount cloudového remote ---
+RCLONE_ENABLED=true
+RCLONE_IMAGE=rclone/rclone
+RCLONE_TAG=latest
+RCLONE_REMOTE=gdrive:Audiobookshelf # remote:cesta z rclone.conf; prázdné = rclone se nenasadí
+RCLONE_MOUNT_POINT=/mnt/gdrive
+RCLONE_CONFIG_DIR=/opt/audio/rclone/config
+RCLONE_CACHE_DIR=/opt/audio/rclone/cache
+RCLONE_MOUNT_ARGS="--allow-other --allow-non-empty --umask 002 --vfs-cache-mode full --vfs-cache-max-size 2G --vfs-cache-max-age 720h --vfs-read-ahead 64M --buffer-size 16M --dir-cache-time 72h --poll-interval 1m --log-level INFO"
+
 # --- Caddy: HTTPS reverse proxy (Let's Encrypt) ---
 CADDY_ENABLED=true                  # false = Caddy se nenasadí (kontejner se odstraní jako orphan)
 CADDY_DOMAIN=audio.example.cz       # veřejná doména; musí být vyplněna, když je CADDY_ENABLED=true
@@ -181,6 +216,35 @@ CADDY_HTTPS_PORT=443
 Změna hodnot v `.env` se projeví při dalším běhu `update-server.sh`
 (compose změnu portů a cest pozná a kontejner znovu vytvoří); pro jistotu
 lze spustit `update-server.sh --force`.
+
+## Úložiště přes rclone
+
+Služba `rclone` připojí `RCLONE_REMOTE` přes FUSE na `RCLONE_MOUNT_POINT`
+(uvnitř kontejneru `/data` s propagací `shared`). Audiobookshelf má tentýž
+adresář jako `/media` s propagací `rslave`, takže mount zůstane vidět i po
+restartu rclone. Kontejner běží s `/dev/fuse`, `SYS_ADMIN` a vypnutým
+AppArmor profilem, jak FUSE v Dockeru vyžaduje.
+
+Nový remote (bez migrace) vytvoříte interaktivně:
+
+```bash
+sudo docker run --rm -it -v /opt/audio/rclone/config:/config/rclone rclone/rclone config
+```
+
+Pro Google Drive: `n` → název `gdrive` → typ `drive` → vlastní `client_id` a
+`client_secret` (doporučeno, jinak sdílíte kvótu API) → scope `1` → „Use web
+browser“ **No** → příkaz `rclone authorize` spusťte na počítači s prohlížečem
+a token vložte zpět. Pak do `.env` zapište `RCLONE_REMOTE=gdrive:<složka>`
+a `RCLONE_ENABLED=true` a spusťte `update-server.sh --force`.
+
+Volby mountu jsou v `RCLONE_MOUNT_ARGS` (remote, přípojný bod a `--cache-dir`
+doplní skript). Cache `--vfs-cache-mode full` drží až `--vfs-cache-max-size`
+v `/opt/audio/rclone/cache`; soubory nahrané přes ABS se do cloudu odesílají
+na pozadí, proto se cache při migraci přesouvá a nikdy nemaže.
+
+V knihovnách nad `/media` v ABS zapněte **Disable folder watcher** (inotify na
+FUSE nefunguje) a **naplánovaný sken** (např. `0 4 * * *`); změny na Drive se
+v mountu projeví do `--poll-interval`.
 
 ## HTTPS přes Caddy
 
@@ -263,12 +327,13 @@ aktualizace je daná služba nedostupná zhruba 10 až 60 sekund.
 | Volba | Význam |
 | --- | --- |
 | `--check` | Jen porovná digesty na ghcr s lokálními; nic nemění. Návratový kód `0` = aktuální, `2` = je aktualizace (nebo není nainstalováno), `1` = chyba. |
-| `--service audiobookshelf` / `--service provider` / `--service caddy` | Aktualizuje jen jednu službu. |
+| `--service audiobookshelf` / `--service provider` / `--service caddy` / `--service rclone` | Aktualizuje jen jednu službu. |
 | `--force` | Znovu vytvoří kontejnery i bez nového image (např. po změně `.env`). |
 | `--no-backup` | Přeskočí zálohu configu. |
 | `--tag TAG` | Tag Audiobookshelf; uloží se do `.env` jako `ABS_TAG`. |
 | `--provider-tag TAG` | Tag provideru; uloží se jako `PROVIDER_TAG`. |
 | `--caddy-tag TAG` | Tag Caddy (výchozí `2`); uloží se jako `CADDY_TAG`. |
+| `--rclone-tag TAG` | Tag rclone (výchozí `latest`); uloží se jako `RCLONE_TAG`. |
 | `--dir DIR` | Jiná nasazovací složka. |
 
 ## Automatická aktualizace
@@ -352,6 +417,7 @@ novější server databázi migruje a starší verze ji pak neotevře.
   (`curl -sSI https://<doména>/healthcheck`); `docker logs audiobookshelf-caddy`
   bez chyb `obtaining certificate`.
 - `docker compose -f /opt/audio/docker-compose.yml ps` ukazuje všechny služby jako `healthy`.
+- `mount | grep rclone` ukazuje `RCLONE_REMOTE` na `RCLONE_MOUNT_POINT`; `docker exec audiobookshelf ls /media` vypíše složky knihoven.
 - V ABS proběhne vyhledání metadat přes provider (Match u libovolné knihy).
 - `docker compose -f /opt/audio/docker-compose.yml logs --tail 100` bez chyb.
 
@@ -363,8 +429,12 @@ novější server databázi migruje a starší verze ji pak neotevře.
 | `curl: (404)` při stahování skriptů | Repozitář je soukromý; použijte hlavičku `Authorization: token <token>` (oprávnění `repo`), `scp`, nebo `deploy.sh --remote`. |
 | `cannot talk to the Docker daemon` | Docker neběží nebo chybí práva; spusťte se `sudo`. |
 | `another update-server.sh is already running` | Běží jiná instance (cron). Počkejte, nebo smažte `.update.lock`, pokud proces prokazatelně neběží. |
-| Služba nenaběhne do 120 s | Podívejte se do vypsaného logu. Nejčastěji obsazený port (`ABS_PORT`, `PROVIDER_PORT`) nebo práva k `config`/`metadata` (`ABS_PUID`/`ABS_PGID`). |
+| Služba nenaběhne do 120 s | Podívejte se do vypsaného logu. Nejčastěji obsazený port (`ABS_PORT`, `PROVIDER_PORT`) nebo práva k `config`/`metadata` (`ABS_UID`/`ABS_GID`). |
 | Po migraci je knihovna prázdná | `ABS_CONFIG_DIR` míří jinam než původní config, nebo se kopírovalo do neprázdné složky (skript ji nechal být). Zkontrolujte `.env` a obsah `/opt/audio/config`. |
+| Sken hlásí `Invalid folder path does not exist "/media/..."`, položky Missing | Kontejner nevidí složku knihovny: chybí `ABS_MEDIA_DIR`/`ABS_EXTRA_MOUNTS` v `.env`, nebo rclone neběží (`docker logs audiobookshelf-rclone`). Doplňte `.env`, spusťte `update-server.sh --force` a pak sken knihovny; Missing položky se vrátí, „Remove missing“ nepoužívejte. |
+| rclone: `path /mnt/gdrive is mounted on / but it is not a shared mount` | Přípojný bod musí ležet na sdíleném mountu: `sudo mount --make-rshared /` (trvale přes systemd unit nebo `/etc/fstab`) a `update-server.sh --service rclone --force`. |
+| rclone: `Transport endpoint is not connected` / `looks like a stale FUSE mount` | Zůstal odpojený mount: `sudo umount -l /mnt/gdrive` a spusťte skript znovu. |
+| `rclone.conf does not exist` | Vytvořte remote příkazem v sekci Úložiště přes rclone, nebo nastavte `RCLONE_ENABLED=false`. |
 | ABS nenajde provider | V ABS musí být URL `http://provider:8000` (název služby v compose síti), ne `localhost`. Pokud běží ABS mimo tento compose, použijte `http://<server>:8000`. |
 | Provider vrací prázdné výsledky | ABS má limit 10 s na metadata; snižte `REQUEST_TIMEOUT_SECONDS`/`SCRAPER_TIMEOUT_SECONDS` (max. 8) nebo vypněte pomalé zdroje `ENABLE_*=false`. |
 | `--check` hlásí chybu manifestu | `docker manifest inspect` potřebuje síť; zkontrolujte připojení k ghcr.io. |

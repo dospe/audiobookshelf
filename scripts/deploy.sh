@@ -4,14 +4,18 @@
 #   - audiobookshelf  (ghcr.io/dospe/audiobookshelf, this fork)
 #   - provider        (ghcr.io/stecik/audiobookshelf_czech_metadata, Czech metadata provider)
 #   - caddy           (caddy:2, HTTPS reverse proxy with automatic Let's Encrypt certificates)
+#   - rclone          (rclone/rclone, FUSE mount of a cloud remote such as Google Drive,
+#                      visible in Audiobookshelf as /media)
 #
 # What it does (idempotent, safe to re-run):
 #   1. creates /opt/audio and installs deploy.sh + update-server.sh into it
 #   2. on the first run migrates an existing installation: an old
-#      "audiobookshelf" container (or /opt/audiobookshelf/{config,metadata}),
-#      an old provider deployment (~/abs-czech-metadata/.env) and an old
-#      "caddy" container (Caddyfile + certificates) are taken over, their
-#      data copied into /opt/audio and the old containers removed
+#      "audiobookshelf" container (or /opt/audiobookshelf/{config,metadata})
+#      including its extra bind mounts and user, an old provider deployment
+#      (~/abs-czech-metadata/.env), an old "caddy" container (Caddyfile +
+#      certificates) and an old rclone mount container (remote, mount
+#      options, rclone.conf, VFS cache) are taken over, their data copied
+#      into /opt/audio and the old containers removed
 #   3. creates /opt/audio/.env (never overwritten later; edit it by hand)
 #      and /opt/audio/caddy/Caddyfile (migrated, or generated from --domain)
 #   4. runs update-server.sh --force: writes docker-compose.yml, pulls the
@@ -30,11 +34,19 @@
 #   --domain HOST         Public host name served over HTTPS by Caddy (default: taken
 #                         from the old Caddyfile; without a domain Caddy is not deployed)
 #   --email ADDRESS       Contact e-mail for Let's Encrypt (default: from the old Caddyfile)
+#   --rclone-remote R     rclone remote to mount, e.g. gdrive:Audiobookshelf (default: taken
+#                         from the old rclone container; without a remote rclone is not deployed)
+#   --mount-point PATH    Host mount point of the rclone remote (default: /mnt/gdrive or the old one)
+#   --media-dir PATH      Host directory shown as /media in Audiobookshelf (default: the rclone
+#                         mount point, or the /media mount of the old container)
+#   --user UID:GID        Run Audiobookshelf as this user (default: the old container's user, else root)
 #   --tag TAG             Audiobookshelf image tag (default: latest)
 #   --provider-tag TAG    Provider image tag (default: latest)
 #   --caddy-tag TAG       Caddy image tag (default: 2)
+#   --rclone-tag TAG      rclone image tag (default: latest)
 #   --no-provider         Do not deploy the metadata provider
 #   --no-caddy            Do not deploy Caddy (CADDY_ENABLED=false)
+#   --no-rclone           Do not deploy rclone (RCLONE_ENABLED=false); an old rclone container is left alone
 #   --no-migrate          Do not look for / take over an old installation
 #   -h, --help            Show this help
 #
@@ -47,7 +59,7 @@ SCRIPT_DIR="$(dirname "$SCRIPT_PATH")"
 
 log() { printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"; }
 die() { log "ERROR: $*" >&2; exit 1; }
-usage() { sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,52p' "$0" | sed 's/^# \{0,1\}//'; }
 
 REMOTE=""
 ABS_DIR="/opt/audio"
@@ -59,8 +71,14 @@ EMAIL_OVERRIDE=""
 TAG_OVERRIDE=""
 PROVIDER_TAG_OVERRIDE=""
 CADDY_TAG_OVERRIDE=""
+RCLONE_TAG_OVERRIDE=""
+RCLONE_REMOTE_OVERRIDE=""
+MOUNT_POINT_OVERRIDE=""
+MEDIA_DIR_OVERRIDE=""
+USER_OVERRIDE=""
 PROVIDER_ENABLED="true"
 CADDY_DISABLED=0
+RCLONE_DISABLED=0
 MIGRATE=1
 ARGS=("$@")
 
@@ -86,8 +104,19 @@ while [[ $# -gt 0 ]]; do
     --domain=*) DOMAIN_OVERRIDE="${1#--domain=}" ;;
     --email) [[ $# -ge 2 ]] || die "--email needs a value"; EMAIL_OVERRIDE="$2"; shift ;;
     --email=*) EMAIL_OVERRIDE="${1#--email=}" ;;
+    --rclone-tag) [[ $# -ge 2 ]] || die "--rclone-tag needs a value"; RCLONE_TAG_OVERRIDE="$2"; shift ;;
+    --rclone-tag=*) RCLONE_TAG_OVERRIDE="${1#--rclone-tag=}" ;;
+    --rclone-remote) [[ $# -ge 2 ]] || die "--rclone-remote needs a value"; RCLONE_REMOTE_OVERRIDE="$2"; shift ;;
+    --rclone-remote=*) RCLONE_REMOTE_OVERRIDE="${1#--rclone-remote=}" ;;
+    --mount-point) [[ $# -ge 2 ]] || die "--mount-point needs a value"; MOUNT_POINT_OVERRIDE="$2"; shift ;;
+    --mount-point=*) MOUNT_POINT_OVERRIDE="${1#--mount-point=}" ;;
+    --media-dir) [[ $# -ge 2 ]] || die "--media-dir needs a value"; MEDIA_DIR_OVERRIDE="$2"; shift ;;
+    --media-dir=*) MEDIA_DIR_OVERRIDE="${1#--media-dir=}" ;;
+    --user) [[ $# -ge 2 ]] || die "--user needs UID:GID"; USER_OVERRIDE="$2"; shift ;;
+    --user=*) USER_OVERRIDE="${1#--user=}" ;;
     --no-provider) PROVIDER_ENABLED="false" ;;
     --no-caddy) CADDY_DISABLED=1 ;;
+    --no-rclone) RCLONE_DISABLED=1 ;;
     --no-migrate) MIGRATE=0 ;;
     -h|--help) usage; exit 0 ;;
     *) die "Unknown option: $1 (see --help)" ;;
@@ -95,7 +124,7 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
-for v in "$TAG_OVERRIDE" "$PROVIDER_TAG_OVERRIDE" "$CADDY_TAG_OVERRIDE"; do
+for v in "$TAG_OVERRIDE" "$PROVIDER_TAG_OVERRIDE" "$CADDY_TAG_OVERRIDE" "$RCLONE_TAG_OVERRIDE"; do
   [[ -z "$v" || "$v" =~ ^[A-Za-z0-9._@:-]+$ ]] || die "invalid tag: $v"
 done
 for v in "$PORT_OVERRIDE" "$PROVIDER_PORT_OVERRIDE"; do
@@ -103,6 +132,11 @@ for v in "$PORT_OVERRIDE" "$PROVIDER_PORT_OVERRIDE"; do
 done
 [[ -z "$DOMAIN_OVERRIDE" || "$DOMAIN_OVERRIDE" =~ ^[A-Za-z0-9.-]+$ ]] || die "invalid domain: $DOMAIN_OVERRIDE"
 [[ -z "$EMAIL_OVERRIDE" || "$EMAIL_OVERRIDE" =~ ^[^[:space:]]+@[^[:space:]]+$ ]] || die "invalid e-mail: $EMAIL_OVERRIDE"
+[[ -z "$RCLONE_REMOTE_OVERRIDE" || "$RCLONE_REMOTE_OVERRIDE" =~ ^[^[:space:]]+:[^[:space:]]*$ ]] || die "invalid rclone remote (expected name:path): $RCLONE_REMOTE_OVERRIDE"
+for v in "$MOUNT_POINT_OVERRIDE" "$MEDIA_DIR_OVERRIDE"; do
+  [[ -z "$v" || "$v" == /* ]] || die "expected an absolute path: $v"
+done
+[[ -z "$USER_OVERRIDE" || "$USER_OVERRIDE" =~ ^[0-9]+:[0-9]+$ ]] || die "--user expects UID:GID, e.g. 1001:1001"
 
 # ---------------------------------------------------------------------------
 # Remote mode: copy both scripts to the host and run deploy there
@@ -172,6 +206,16 @@ OLD_CADDY_DATA_SRC=""
 OLD_CADDY_CONFIG_SRC=""
 DETECTED_DOMAIN=""
 DETECTED_EMAIL=""
+DETECTED_MEDIA_DIR=""
+DETECTED_EXTRA_MOUNTS=()
+DETECTED_USER=""
+OLD_RCLONE=""
+OLD_RCLONE_PROJECT_DIR=""
+OLD_RCLONE_CONFIG_SRC=""
+OLD_RCLONE_CACHE_SRC=""
+DETECTED_RCLONE_REMOTE=""
+DETECTED_RCLONE_ARGS=""
+DETECTED_MOUNT_POINT=""
 PROVIDER_IMPORT=()
 
 home_dirs() {
@@ -180,10 +224,27 @@ home_dirs() {
   echo /root
 }
 
+all_mounts() {
+  # $1 container -> lines "destination type source-or-name propagation rw"
+  docker inspect --format '{{range .Mounts}}{{.Destination}} {{.Type}} {{if eq .Type "bind"}}{{.Source}}{{else}}{{.Name}}{{end}} {{.Propagation}} {{.RW}}{{"\n"}}{{end}}' "$1" 2>/dev/null
+}
 mount_source() {
   # $1 container, $2 destination inside the container -> "bind:/path" or "volume:name" or ""
-  docker inspect --format '{{range .Mounts}}{{.Destination}} {{.Type}} {{if eq .Type "bind"}}{{.Source}}{{else}}{{.Name}}{{end}}{{"\n"}}{{end}}' "$1" 2>/dev/null |
-    awk -v d="$2" '$1 == d { print $2 ":" $3; exit }'
+  all_mounts "$1" | awk -v d="$2" '$1 == d { print $2 ":" $3; exit }'
+}
+compose_project_of() { docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}' "$1" 2>/dev/null || true; }
+compose_workdir_of() { docker inspect --format '{{index .Config.Labels "com.docker.compose.project.working_dir"}}' "$1" 2>/dev/null || true; }
+maybe_rename_old_project() {
+  # $1 working dir of an old compose project: rename it once none of its containers is left
+  local dir="$1" name
+  [[ -n "$dir" && -d "$dir" && "$dir" != "$ABS_DIR" ]] || return 0
+  name="$(basename "$dir")"
+  if [[ -z "$(docker ps -aq --filter "label=com.docker.compose.project=$name" 2>/dev/null)" ]]; then
+    log "The old compose project in $dir has no containers left, renaming it to $name.migrated-$(date +%Y%m%d)"
+    mv "$dir" "$dir.migrated-$(date +%Y%m%d)" 2>/dev/null || true
+  else
+    log "Other containers of the old compose project in $dir still exist, leaving the directory alone"
+  fi
 }
 
 copy_tree() {
@@ -209,17 +270,26 @@ if [[ $MIGRATE -eq 1 && ! -f "$ENV_FILE" ]]; then
     if [[ "$project" != "$(basename "$ABS_DIR")" ]]; then
       OLD_CONTAINER="$cid"
       log "Found an existing audiobookshelf container (${cid:0:12}, compose project '${project:-none}')"
-      for dest in /audiobooks /config /metadata; do
-        m="$(mount_source "$cid" "$dest")"
-        [[ -n "$m" ]] || continue
-        kind="${m%%:*}"; src="${m#*:}"
-        log "  $dest is a $kind mount: $src"
+      while read -r dest kind src prop rw; do
+        [[ -n "$dest" ]] || continue
+        log "  $dest is a $kind mount: $src${prop:+ ($prop)}"
         case "$dest" in
           /audiobooks) [[ "$kind" == "bind" ]] && DETECTED_AUDIOBOOKS="$src" ;;
-          /config) DETECTED_CONFIG_SRC="$m" ;;
-          /metadata) DETECTED_METADATA_SRC="$m" ;;
+          /config) DETECTED_CONFIG_SRC="$kind:$src" ;;
+          /metadata) DETECTED_METADATA_SRC="$kind:$src" ;;
+          /media) [[ "$kind" == "bind" ]] && DETECTED_MEDIA_DIR="$src" ;;
+          *)
+            [[ "$kind" == "bind" ]] || continue
+            opts=""
+            [[ "$rw" == "false" ]] && opts="ro"
+            case "$prop" in rshared|shared|rslave|slave) opts="${opts:+$opts,}$prop" ;; esac
+            DETECTED_EXTRA_MOUNTS+=("$src:$dest${opts:+:$opts}")
+            ;;
         esac
-      done
+      done < <(all_mounts "$cid")
+      DETECTED_USER="$(docker inspect --format '{{.Config.User}}' "$cid" 2>/dev/null || true)"
+      [[ "$DETECTED_USER" =~ ^[0-9]+:[0-9]+$ ]] || DETECTED_USER=""
+      [[ -n "$DETECTED_USER" ]] && log "  runs as user $DETECTED_USER"
     fi
   fi
   # 2. an old bind-mount layout without a container
@@ -280,6 +350,51 @@ if [[ $MIGRATE -eq 1 && $CADDY_DISABLED -eq 0 ]] && ! { [[ -f "$ENV_FILE" ]] && 
   done < <(docker ps -a --format '{{.ID}} {{.Names}} {{.Image}}' 2>/dev/null || true)
 fi
 
+# 5. an old rclone mount container (also when .env already exists but rclone was never configured in it)
+if [[ $MIGRATE -eq 1 && $RCLONE_DISABLED -eq 0 ]] && ! { [[ -f "$ENV_FILE" ]] && grep -q '^RCLONE_ENABLED=' "$ENV_FILE"; }; then
+  while read -r cid cname cimage; do
+    [[ -n "$cid" ]] || continue
+    [[ "$cname" == rclone* || "$cimage" =~ ^(docker\.io/)?rclone/rclone(:|@|$) ]] || continue
+    project="$(compose_project_of "$cid")"
+    [[ "$project" != "$(basename "$ABS_DIR")" ]] || continue
+    cmd="$(docker inspect --format '{{join .Config.Cmd " "}}' "$cid" 2>/dev/null || true)"
+    read -r -a words <<<"$cmd"
+    [[ "${words[0]:-}" == "mount" && -n "${words[1]:-}" && -n "${words[2]:-}" ]] || { log "Skipping container '$cname' (${cid:0:12}): not an rclone mount command"; continue; }
+    OLD_RCLONE="$cid"
+    OLD_RCLONE_PROJECT_DIR="$(compose_workdir_of "$cid")"
+    DETECTED_RCLONE_REMOTE="${words[1]}"
+    inner_mp="${words[2]}"
+    args=(); i=3
+    while [[ $i -lt ${#words[@]} ]]; do
+      case "${words[$i]}" in
+        --cache-dir) i=$((i + 2)); continue ;;
+        --cache-dir=*) i=$((i + 1)); continue ;;
+      esac
+      args+=("${words[$i]}"); i=$((i + 1))
+    done
+    DETECTED_RCLONE_ARGS="${args[*]}"
+    log "Found an existing rclone container '$cname' (${cid:0:12}, compose project '${project:-none}'): mount $DETECTED_RCLONE_REMOTE"
+    while read -r dest kind src _; do
+      [[ -n "$dest" ]] || continue
+      log "  $dest is a $kind mount: $src"
+      if [[ "$dest" == "$inner_mp" ]]; then
+        [[ "$kind" == "bind" ]] && DETECTED_MOUNT_POINT="$src"
+      elif [[ "$dest" == "/config/rclone" ]]; then
+        OLD_RCLONE_CONFIG_SRC="$kind:$src"
+      elif [[ "$dest" == "/cache" ]]; then
+        OLD_RCLONE_CACHE_SRC="$kind:$src"
+      fi
+    done < <(all_mounts "$cid")
+    # the old stack kept the server's UID/GID in its .env
+    if [[ -z "$DETECTED_USER" && -n "$OLD_RCLONE_PROJECT_DIR" && -f "$OLD_RCLONE_PROJECT_DIR/.env" ]]; then
+      u="$(grep -m1 '^ABS_UID=' "$OLD_RCLONE_PROJECT_DIR/.env" | cut -d= -f2)"
+      g="$(grep -m1 '^ABS_GID=' "$OLD_RCLONE_PROJECT_DIR/.env" | cut -d= -f2)"
+      [[ "$u" =~ ^[0-9]+$ && "$g" =~ ^[0-9]+$ ]] && DETECTED_USER="$u:$g" && log "  the old stack ran Audiobookshelf as $DETECTED_USER"
+    fi
+    break
+  done < <(docker ps -a --format '{{.ID}} {{.Names}} {{.Image}}' 2>/dev/null || true)
+fi
+
 # ---------------------------------------------------------------------------
 # Configuration (.env is created once and never overwritten)
 # ---------------------------------------------------------------------------
@@ -287,6 +402,41 @@ CADDY_DOMAIN_NEW="${DOMAIN_OVERRIDE:-$DETECTED_DOMAIN}"
 CADDY_EMAIL_NEW="${EMAIL_OVERRIDE:-$DETECTED_EMAIL}"
 CADDY_ENABLED_NEW="false"
 [[ $CADDY_DISABLED -eq 0 && -n "$CADDY_DOMAIN_NEW" ]] && CADDY_ENABLED_NEW="true"
+
+RCLONE_REMOTE_NEW="${RCLONE_REMOTE_OVERRIDE:-$DETECTED_RCLONE_REMOTE}"
+RCLONE_MOUNT_POINT_NEW="${MOUNT_POINT_OVERRIDE:-${DETECTED_MOUNT_POINT:-/mnt/gdrive}}"
+RCLONE_ENABLED_NEW="false"
+[[ $RCLONE_DISABLED -eq 0 && -n "$RCLONE_REMOTE_NEW" ]] && RCLONE_ENABLED_NEW="true"
+MEDIA_DIR_NEW="${MEDIA_DIR_OVERRIDE:-$DETECTED_MEDIA_DIR}"
+[[ -z "$MEDIA_DIR_NEW" && "$RCLONE_ENABLED_NEW" == "true" ]] && MEDIA_DIR_NEW="$RCLONE_MOUNT_POINT_NEW"
+USER_NEW="${USER_OVERRIDE:-$DETECTED_USER}"
+EXTRA_MOUNTS_NEW="${DETECTED_EXTRA_MOUNTS[*]:-}"
+
+storage_env_block() {
+  cat <<EOF
+
+# --- Storage and user of the Audiobookshelf container ---
+# Run the server as this user (empty = root). Config and metadata are chown-ed to it.
+ABS_UID=${USER_NEW%%:*}
+ABS_GID=${USER_NEW#*:}
+# Host directory shown as /media (bind propagation rslave: FUSE mounts made later are visible)
+ABS_MEDIA_DIR=${MEDIA_DIR_NEW}
+# Further bind mounts, space separated: /host/path:/container/path[:ro][:rslave]
+ABS_EXTRA_MOUNTS="${EXTRA_MOUNTS_NEW}"
+
+# --- rclone: FUSE mount of a cloud remote (e.g. Google Drive) on RCLONE_MOUNT_POINT ---
+# Needs RCLONE_REMOTE and rclone/config/rclone.conf (docker run --rm -it -v /opt/audio/rclone/config:/config/rclone rclone/rclone config)
+RCLONE_ENABLED=${RCLONE_ENABLED_NEW}
+RCLONE_IMAGE=rclone/rclone
+RCLONE_TAG=${RCLONE_TAG_OVERRIDE:-latest}
+RCLONE_REMOTE=${RCLONE_REMOTE_NEW}
+RCLONE_MOUNT_POINT=${RCLONE_MOUNT_POINT_NEW}
+RCLONE_CONFIG_DIR=${ABS_DIR}/rclone/config
+RCLONE_CACHE_DIR=${ABS_DIR}/rclone/cache
+# Options of "rclone mount" (the remote, mount point and --cache-dir are added by the script)
+RCLONE_MOUNT_ARGS="${DETECTED_RCLONE_ARGS:---allow-other --allow-non-empty --umask 002 --vfs-cache-mode full --vfs-cache-max-size 2G --vfs-cache-max-age 720h --vfs-read-ahead 64M --buffer-size 16M --dir-cache-time 72h --poll-interval 1m --log-level INFO}"
+EOF
+}
 
 caddy_env_block() {
   cat <<EOF
@@ -324,9 +474,6 @@ ABS_METADATA_DIR=${ABS_DIR}/metadata
 ABS_BACKUP_DIR=${ABS_DIR}/backups
 ABS_BACKUP_KEEP=7
 ABS_TZ=Europe/Prague
-# User/group the server runs as (must read the audiobooks and write config/metadata)
-ABS_PUID=1000
-ABS_PGID=1000
 
 # --- Czech metadata provider ---
 PROVIDER_ENABLED=${PROVIDER_ENABLED}
@@ -357,6 +504,7 @@ ENABLE_PROGRESGURU=true
 ENABLE_RADIOTEKA=true
 ENABLE_ROZHLAS=true
 EOF
+    storage_env_block
     caddy_env_block
   } >"$ENV_FILE"
   # Values imported from the old provider .env override the defaults above
@@ -391,6 +539,21 @@ else
     [[ -n "$EMAIL_OVERRIDE" ]] && set_env_value CADDY_EMAIL "$EMAIL_OVERRIDE"
     [[ -n "$CADDY_TAG_OVERRIDE" ]] && set_env_value CADDY_TAG "$CADDY_TAG_OVERRIDE"
     [[ $CADDY_DISABLED -eq 1 ]] && set_env_value CADDY_ENABLED false
+  fi
+  if ! grep -q '^RCLONE_ENABLED=' "$ENV_FILE"; then
+    # Installed before rclone support existed: add the section (enabled only when a remote is known)
+    storage_env_block >>"$ENV_FILE"
+    log "Added the storage/rclone section to $ENV_FILE (RCLONE_ENABLED=$RCLONE_ENABLED_NEW${RCLONE_REMOTE_NEW:+, remote $RCLONE_REMOTE_NEW}${MEDIA_DIR_NEW:+, /media = $MEDIA_DIR_NEW}${USER_NEW:+, user $USER_NEW})"
+  else
+    [[ -n "$RCLONE_REMOTE_OVERRIDE" ]] && set_env_value RCLONE_REMOTE "$RCLONE_REMOTE_OVERRIDE" && set_env_value RCLONE_ENABLED true
+    [[ -n "$MOUNT_POINT_OVERRIDE" ]] && set_env_value RCLONE_MOUNT_POINT "$MOUNT_POINT_OVERRIDE"
+    [[ -n "$MEDIA_DIR_OVERRIDE" ]] && set_env_value ABS_MEDIA_DIR "$MEDIA_DIR_OVERRIDE"
+    [[ -n "$RCLONE_TAG_OVERRIDE" ]] && set_env_value RCLONE_TAG "$RCLONE_TAG_OVERRIDE"
+    [[ $RCLONE_DISABLED -eq 1 ]] && set_env_value RCLONE_ENABLED false
+    if [[ -n "$USER_OVERRIDE" ]]; then
+      set_env_value ABS_UID "${USER_OVERRIDE%%:*}"
+      set_env_value ABS_GID "${USER_OVERRIDE#*:}"
+    fi
   fi
 fi
 
@@ -463,17 +626,47 @@ if [[ -n "$OLD_CADDY" ]]; then
   if [[ "${CADDY_ENABLED:-false}" == "true" ]]; then
     log "Removing the old Caddy container (its Caddyfile and certificates are now in $CADDY_DIR)"
     docker rm -f "$OLD_CADDY" >/dev/null
-    if [[ -n "$OLD_CADDY_PROJECT_DIR" && -d "$OLD_CADDY_PROJECT_DIR" && "$OLD_CADDY_PROJECT_DIR" != "$ABS_DIR" ]]; then
-      proj_name="$(basename "$OLD_CADDY_PROJECT_DIR")"
-      if [[ -z "$(docker ps -aq --filter "label=com.docker.compose.project=$proj_name" 2>/dev/null)" ]]; then
-        log "The old compose project in $OLD_CADDY_PROJECT_DIR has no containers left, renaming it to $(basename "$OLD_CADDY_PROJECT_DIR").migrated-$(date +%Y%m%d)"
-        mv "$OLD_CADDY_PROJECT_DIR" "$OLD_CADDY_PROJECT_DIR.migrated-$(date +%Y%m%d)" 2>/dev/null || true
-      else
-        log "Other containers of the old compose project in $OLD_CADDY_PROJECT_DIR still exist, leaving the directory alone"
-      fi
-    fi
+    [[ -n "$OLD_RCLONE" ]] || maybe_rename_old_project "$OLD_CADDY_PROJECT_DIR"
   else
     log "Caddy stays disabled (no domain known); the old container was only stopped. Re-run with --domain <host> to take it over."
+  fi
+fi
+
+if [[ -n "$OLD_RCLONE" ]]; then
+  if [[ "${RCLONE_ENABLED:-false}" == "true" ]]; then
+    RCLONE_CONFIG_DIR="${RCLONE_CONFIG_DIR:-$ABS_DIR/rclone/config}"
+    RCLONE_CACHE_DIR="${RCLONE_CACHE_DIR:-$ABS_DIR/rclone/cache}"
+    mkdir -p "$RCLONE_CONFIG_DIR" "$RCLONE_CACHE_DIR"
+    log "Stopping the old rclone container (the mount on ${RCLONE_MOUNT_POINT:-?} is re-created by the new stack)"
+    docker stop "$OLD_RCLONE" >/dev/null 2>&1 || true
+    if [[ -f "$RCLONE_CONFIG_DIR/rclone.conf" ]]; then
+      log "Keeping existing $RCLONE_CONFIG_DIR/rclone.conf"
+    elif [[ "${OLD_RCLONE_CONFIG_SRC%%:*}" == "bind" && -f "${OLD_RCLONE_CONFIG_SRC#*:}/rclone.conf" ]]; then
+      copy_tree "${OLD_RCLONE_CONFIG_SRC#*:}" "$RCLONE_CONFIG_DIR"
+    elif docker cp "$OLD_RCLONE:/config/rclone/." "$RCLONE_CONFIG_DIR/" >/dev/null 2>&1; then
+      log "Copied the rclone configuration from the old container -> $RCLONE_CONFIG_DIR"
+    fi
+    [[ -f "$RCLONE_CONFIG_DIR/rclone.conf" ]] || log "WARNING: no rclone.conf found; create it with: docker run --rm -it -v $RCLONE_CONFIG_DIR:/config/rclone rclone/rclone config"
+    # The VFS cache may hold uploads that are not on the remote yet: move it, do not copy
+    if [[ "${OLD_RCLONE_CACHE_SRC%%:*}" == "bind" && -d "${OLD_RCLONE_CACHE_SRC#*:}" ]]; then
+      old_cache="$(readlink -f "${OLD_RCLONE_CACHE_SRC#*:}")"
+      if [[ "$old_cache" != "$(readlink -f "$RCLONE_CACHE_DIR")" ]]; then
+        if [[ -n "$(ls -A "$RCLONE_CACHE_DIR" 2>/dev/null)" ]]; then
+          log "Keeping existing $RCLONE_CACHE_DIR (not empty), leaving the old cache in $old_cache"
+        elif rmdir "$RCLONE_CACHE_DIR" 2>/dev/null && mv "$old_cache" "$RCLONE_CACHE_DIR" 2>/dev/null; then
+          log "Moved the rclone cache $old_cache -> $RCLONE_CACHE_DIR"
+        else
+          mkdir -p "$RCLONE_CACHE_DIR"
+          copy_tree "$old_cache" "$RCLONE_CACHE_DIR"
+        fi
+      fi
+    fi
+    log "Removing the old rclone container"
+    docker rm -f "$OLD_RCLONE" >/dev/null
+    maybe_rename_old_project "$OLD_RCLONE_PROJECT_DIR"
+    [[ -n "$OLD_CADDY_PROJECT_DIR" && "$OLD_CADDY_PROJECT_DIR" != "$OLD_RCLONE_PROJECT_DIR" ]] && maybe_rename_old_project "$OLD_CADDY_PROJECT_DIR"
+  else
+    log "rclone stays disabled; the old rclone container is left running. Re-run with --rclone-remote <remote> to take it over."
   fi
 fi
 
@@ -490,6 +683,16 @@ Deployment finished.
   Configuration:  $ENV_FILE
   Audiobookshelf: http://<server>:${ABS_PORT:-13378}/   (library path inside the container: /audiobooks)
 EOF
+if [[ "${RCLONE_ENABLED:-false}" == "true" ]]; then
+  cat <<EOF
+  rclone:         ${RCLONE_REMOTE} mounted on ${RCLONE_MOUNT_POINT} = /media in Audiobookshelf (config $ABS_DIR/rclone/config)
+EOF
+elif [[ -n "${ABS_MEDIA_DIR:-}" ]]; then
+  cat <<EOF
+  Media:          ${ABS_MEDIA_DIR} = /media in Audiobookshelf
+EOF
+fi
+[[ -n "${ABS_UID:-}" ]] && echo "  User:           Audiobookshelf runs as ${ABS_UID}:${ABS_GID:-}"
 if [[ "${CADDY_ENABLED:-false}" == "true" ]]; then
   cat <<EOF
   HTTPS:          https://${CADDY_DOMAIN}/   (Caddy; site config $ABS_DIR/caddy/Caddyfile, certificates $ABS_DIR/caddy/data)

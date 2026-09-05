@@ -4,6 +4,8 @@
 #   - audiobookshelf  (ghcr.io/dospe/audiobookshelf, this fork)
 #   - provider        (ghcr.io/stecik/audiobookshelf_czech_metadata, Czech metadata provider)
 #   - caddy           (caddy:2, HTTPS reverse proxy with automatic Let's Encrypt certificates)
+#   - rclone          (rclone/rclone, FUSE mount of a cloud remote, e.g. Google Drive, that
+#                      Audiobookshelf sees as /media)
 #
 # Running it repeatedly is safe: it only creates what is missing, rewrites the
 # compose file only when its content changed, backs up the Audiobookshelf
@@ -12,22 +14,25 @@
 #
 # Usage:
 #   update-server.sh [--check] [--force] [--no-backup] [--service NAME]
-#                    [--tag TAG] [--provider-tag TAG] [--caddy-tag TAG] [--dir DIR]
+#                    [--tag TAG] [--provider-tag TAG] [--caddy-tag TAG] [--rclone-tag TAG] [--dir DIR]
 #
 # Options:
 #   --check           Only report whether newer images are available, change nothing
 #   --force           Recreate the containers even when the images did not change
 #   --no-backup       Skip the config backup for this run
-#   --service NAME    Limit the update to one service: audiobookshelf, provider, caddy (default: all)
+#   --service NAME    Limit the update to one service: audiobookshelf, provider, caddy, rclone (default: all)
 #   --tag TAG         Audiobookshelf image tag (default: latest; e.g. edge, v2.36.0,
 #                     or latest@sha256:<digest> for a pinned rollback), saved to .env
 #   --provider-tag T  Provider image tag (default: latest), saved to .env
 #   --caddy-tag TAG   Caddy image tag (default: 2), saved to .env
+#   --rclone-tag TAG  rclone image tag (default: latest), saved to .env
 #   --dir DIR         Deployment directory (default: $ABS_DIR or /opt/audio)
 #   -h, --help        Show this help
 #
 # Configuration lives in DIR/.env (created by deploy.sh; see docs/UPDATE.cs.md).
 # The Caddy site configuration is DIR/caddy/Caddyfile (created once, edit by hand).
+# The rclone remote configuration is DIR/rclone/config/rclone.conf (created with
+# `rclone config`, see docs/UPDATE.cs.md).
 #
 # Exit codes: 0 ok / up to date, 1 error, 2 update available (only with --check)
 
@@ -41,13 +46,14 @@ SERVICE_FILTER="all"
 TAG_OVERRIDE=""
 PROVIDER_TAG_OVERRIDE=""
 CADDY_TAG_OVERRIDE=""
+RCLONE_TAG_OVERRIDE=""
 DIR_OVERRIDE=""
 
 log() { printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"; }
 die() { log "ERROR: $*" >&2; exit 1; }
 
 usage() {
-  sed -n '2,33p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,38p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 while [[ $# -gt 0 ]]; do
@@ -63,6 +69,8 @@ while [[ $# -gt 0 ]]; do
     --provider-tag=*) PROVIDER_TAG_OVERRIDE="${1#--provider-tag=}" ;;
     --caddy-tag) [[ $# -ge 2 ]] || die "--caddy-tag needs a value"; CADDY_TAG_OVERRIDE="$2"; shift ;;
     --caddy-tag=*) CADDY_TAG_OVERRIDE="${1#--caddy-tag=}" ;;
+    --rclone-tag) [[ $# -ge 2 ]] || die "--rclone-tag needs a value"; RCLONE_TAG_OVERRIDE="$2"; shift ;;
+    --rclone-tag=*) RCLONE_TAG_OVERRIDE="${1#--rclone-tag=}" ;;
     --dir) [[ $# -ge 2 ]] || die "--dir needs a value"; DIR_OVERRIDE="$2"; shift ;;
     --dir=*) DIR_OVERRIDE="${1#--dir=}" ;;
     -h|--help) usage; exit 0 ;;
@@ -72,8 +80,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 case "$SERVICE_FILTER" in
-  all|audiobookshelf|provider|caddy) ;;
-  *) die "--service must be audiobookshelf, provider, caddy or all" ;;
+  all|audiobookshelf|provider|caddy|rclone) ;;
+  *) die "--service must be audiobookshelf, provider, caddy, rclone or all" ;;
 esac
 
 # ---------------------------------------------------------------------------
@@ -115,8 +123,14 @@ ABS_METADATA_DIR="${ABS_METADATA_DIR:-$ABS_DIR/metadata}"
 ABS_BACKUP_DIR="${ABS_BACKUP_DIR:-$ABS_DIR/backups}"
 ABS_BACKUP_KEEP="${ABS_BACKUP_KEEP:-7}"
 ABS_TZ="${ABS_TZ:-Europe/Prague}"
-ABS_PUID="${ABS_PUID:-1000}"
-ABS_PGID="${ABS_PGID:-1000}"
+# Optional: run the server as this user (compose `user:`); empty = root (the image default)
+ABS_UID="${ABS_UID:-}"
+ABS_GID="${ABS_GID:-}"
+# Optional: host directory shown as /media (bind propagation rslave, so FUSE mounts made
+# later on the host are visible); defaults to the rclone mount point when rclone is enabled
+ABS_MEDIA_DIR="${ABS_MEDIA_DIR:-}"
+# Optional: further bind mounts, space separated, host:container[:options]
+ABS_EXTRA_MOUNTS="${ABS_EXTRA_MOUNTS:-}"
 PROVIDER_IMAGE="${PROVIDER_IMAGE:-ghcr.io/stecik/audiobookshelf_czech_metadata}"
 PROVIDER_TAG="${PROVIDER_TAG_OVERRIDE:-${PROVIDER_TAG:-latest}}"
 PROVIDER_PORT="${PROVIDER_PORT:-8000}"
@@ -130,14 +144,35 @@ CADDY_HTTP_PORT="${CADDY_HTTP_PORT:-80}"
 CADDY_HTTPS_PORT="${CADDY_HTTPS_PORT:-443}"
 CADDY_DIR="$ABS_DIR/caddy"
 CADDYFILE="$CADDY_DIR/Caddyfile"
+RCLONE_ENABLED="${RCLONE_ENABLED:-false}"
+RCLONE_IMAGE="${RCLONE_IMAGE:-rclone/rclone}"
+RCLONE_TAG="${RCLONE_TAG_OVERRIDE:-${RCLONE_TAG:-latest}}"
+RCLONE_REMOTE="${RCLONE_REMOTE:-}"
+RCLONE_MOUNT_POINT="${RCLONE_MOUNT_POINT:-/mnt/gdrive}"
+RCLONE_CONFIG_DIR="${RCLONE_CONFIG_DIR:-$ABS_DIR/rclone/config}"
+RCLONE_CACHE_DIR="${RCLONE_CACHE_DIR:-$ABS_DIR/rclone/cache}"
+RCLONE_MOUNT_ARGS="${RCLONE_MOUNT_ARGS:---allow-other --allow-non-empty --umask 002 --vfs-cache-mode full --vfs-cache-max-size 2G --vfs-cache-max-age 720h --vfs-read-ahead 64M --buffer-size 16M --dir-cache-time 72h --poll-interval 1m --log-level INFO}"
+if [[ "$RCLONE_ENABLED" == "true" && -z "$ABS_MEDIA_DIR" ]]; then
+  ABS_MEDIA_DIR="$RCLONE_MOUNT_POINT"
+fi
 
 ABS_REF="${ABS_IMAGE}:${ABS_TAG}"
 PROVIDER_REF="${PROVIDER_IMAGE}:${PROVIDER_TAG}"
 CADDY_REF="${CADDY_IMAGE}:${CADDY_TAG}"
+RCLONE_REF="${RCLONE_IMAGE}:${RCLONE_TAG}"
 
 if [[ "$CADDY_ENABLED" == "true" && -z "$CADDY_DOMAIN" ]]; then
   die "CADDY_ENABLED=true but CADDY_DOMAIN is empty in $ENV_FILE"
 fi
+if [[ "$RCLONE_ENABLED" == "true" ]]; then
+  [[ -n "$RCLONE_REMOTE" ]] || die "RCLONE_ENABLED=true but RCLONE_REMOTE is empty in $ENV_FILE (e.g. gdrive:Audiobookshelf)"
+  [[ -f "$RCLONE_CONFIG_DIR/rclone.conf" ]] || die "$RCLONE_CONFIG_DIR/rclone.conf does not exist; create the remote first: docker run --rm -it -v $RCLONE_CONFIG_DIR:/config/rclone $RCLONE_REF config"
+fi
+[[ -z "$ABS_UID" || "$ABS_UID" =~ ^[0-9]+$ ]] || die "ABS_UID must be numeric"
+[[ -z "$ABS_GID" || "$ABS_GID" =~ ^[0-9]+$ ]] || die "ABS_GID must be numeric"
+for m in $ABS_EXTRA_MOUNTS; do
+  [[ "$m" == /*:/* ]] || die "ABS_EXTRA_MOUNTS entry '$m' must look like /host/path:/container/path[:options]"
+done
 
 # Persist tag overrides so later runs keep deploying them
 set_env_value() {
@@ -152,11 +187,29 @@ if [[ $CHECK_ONLY -eq 0 ]]; then
   [[ -n "$TAG_OVERRIDE" ]] && set_env_value ABS_TAG "$TAG_OVERRIDE"
   [[ -n "$PROVIDER_TAG_OVERRIDE" ]] && set_env_value PROVIDER_TAG "$PROVIDER_TAG_OVERRIDE"
   [[ -n "$CADDY_TAG_OVERRIDE" ]] && set_env_value CADDY_TAG "$CADDY_TAG_OVERRIDE"
+  [[ -n "$RCLONE_TAG_OVERRIDE" ]] && set_env_value RCLONE_TAG "$RCLONE_TAG_OVERRIDE"
 fi
 
 for d in "$ABS_AUDIOBOOKS_DIR" "$ABS_CONFIG_DIR" "$ABS_METADATA_DIR" "$ABS_BACKUP_DIR"; do
   [[ -d "$d" ]] || { log "Creating directory $d"; mkdir -p "$d"; }
 done
+if [[ "$RCLONE_ENABLED" == "true" ]]; then
+  for d in "$RCLONE_CONFIG_DIR" "$RCLONE_CACHE_DIR"; do
+    [[ -d "$d" ]] || { log "Creating directory $d"; mkdir -p "$d"; }
+  done
+  if [[ ! -d "$RCLONE_MOUNT_POINT" ]] && ! mkdir -p "$RCLONE_MOUNT_POINT" 2>/dev/null; then
+    die "$RCLONE_MOUNT_POINT looks like a stale FUSE mount; fix it with: umount -l $RCLONE_MOUNT_POINT"
+  fi
+fi
+# The server runs as ABS_UID:ABS_GID and must own its config and metadata
+if [[ -n "$ABS_UID" && -n "$ABS_GID" && $CHECK_ONLY -eq 0 ]]; then
+  for d in "$ABS_CONFIG_DIR" "$ABS_METADATA_DIR"; do
+    if [[ "$(stat -c '%u:%g' "$d")" != "$ABS_UID:$ABS_GID" ]]; then
+      log "Changing the owner of $d to $ABS_UID:$ABS_GID"
+      chown -R "$ABS_UID:$ABS_GID" "$d"
+    fi
+  done
+fi
 
 # Caddyfile: written once from the template, afterwards it belongs to the admin
 write_caddyfile() {
@@ -177,7 +230,9 @@ if [[ "$CADDY_ENABLED" == "true" && ! -f "$CADDYFILE" ]]; then
   fi
 fi
 
-SERVICES=(audiobookshelf)
+SERVICES=()
+[[ "$RCLONE_ENABLED" == "true" ]] && SERVICES+=(rclone)
+SERVICES+=(audiobookshelf)
 [[ "$PROVIDER_ENABLED" == "true" ]] && SERVICES+=(provider)
 [[ "$CADDY_ENABLED" == "true" ]] && SERVICES+=(caddy)
 if [[ "$SERVICE_FILTER" != "all" ]]; then
@@ -186,6 +241,9 @@ if [[ "$SERVICE_FILTER" != "all" ]]; then
   fi
   if [[ "$SERVICE_FILTER" == "caddy" && "$CADDY_ENABLED" != "true" ]]; then
     die "caddy is disabled in $ENV_FILE (CADDY_ENABLED=false)"
+  fi
+  if [[ "$SERVICE_FILTER" == "rclone" && "$RCLONE_ENABLED" != "true" ]]; then
+    die "rclone is disabled in $ENV_FILE (RCLONE_ENABLED=false)"
   fi
   SERVICES=("$SERVICE_FILTER")
 fi
@@ -196,21 +254,83 @@ fi
 build_compose() {
   cat <<'EOF'
 # Managed by update-server.sh - edit .env instead of this file.
+
+# Log rotation for every container (json logs would otherwise grow without limit)
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
+EOF
+  if [[ "$RCLONE_ENABLED" == "true" ]]; then
+    cat <<'EOF'
+  # Cloud storage (RCLONE_REMOTE) mounted with FUSE on RCLONE_MOUNT_POINT; the "shared"
+  # propagation makes the mount visible to audiobookshelf as /media (rslave).
+  rclone:
+    image: ${RCLONE_IMAGE}:${RCLONE_TAG}
+    container_name: audiobookshelf-rclone
+    restart: unless-stopped
+    logging: *default-logging
+    volumes:
+      - ${RCLONE_CONFIG_DIR}:/config/rclone
+      - ${RCLONE_CACHE_DIR}:/cache
+      - ${RCLONE_MOUNT_POINT}:/data:shared
+    devices:
+      - /dev/fuse
+    cap_add:
+      - SYS_ADMIN
+    security_opt:
+      - apparmor:unconfined
+    command: mount ${RCLONE_REMOTE} /data --cache-dir /cache ${RCLONE_MOUNT_ARGS}
+    healthcheck:
+      test: ["CMD-SHELL", "grep -q ' /data fuse.rclone ' /proc/mounts"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+EOF
+  fi
+  cat <<'EOF'
   audiobookshelf:
     image: ${ABS_IMAGE}:${ABS_TAG}
     container_name: audiobookshelf
     restart: unless-stopped
+    logging: *default-logging
+EOF
+  if [[ -n "$ABS_UID" && -n "$ABS_GID" ]]; then
+    cat <<'EOF'
+    user: "${ABS_UID}:${ABS_GID}"
+EOF
+  fi
+  if [[ "$RCLONE_ENABLED" == "true" ]]; then
+    cat <<'EOF'
+    depends_on:
+      rclone:
+        condition: service_healthy
+EOF
+  fi
+  cat <<'EOF'
     ports:
       - "${ABS_PORT}:80"
     volumes:
       - ${ABS_AUDIOBOOKS_DIR}:/audiobooks
       - ${ABS_CONFIG_DIR}:/config
       - ${ABS_METADATA_DIR}:/metadata
+EOF
+  if [[ -n "$ABS_MEDIA_DIR" ]]; then
+    cat <<'EOF'
+      - ${ABS_MEDIA_DIR}:/media:rslave
+EOF
+  fi
+  for m in $ABS_EXTRA_MOUNTS; do
+    printf '      - %s\n' "$m"
+  done
+  cat <<'EOF'
     environment:
       - TZ=${ABS_TZ}
-      - PUID=${ABS_PUID}
-      - PGID=${ABS_PGID}
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:80/healthcheck"]
       interval: 30s
@@ -226,6 +346,7 @@ EOF
     image: ${PROVIDER_IMAGE}:${PROVIDER_TAG}
     container_name: audiobookshelf-provider
     restart: unless-stopped
+    logging: *default-logging
     ports:
       - "${PROVIDER_PORT}:8000"
     environment:
@@ -269,6 +390,7 @@ EOF
     image: ${CADDY_IMAGE}:${CADDY_TAG}
     container_name: audiobookshelf-caddy
     restart: unless-stopped
+    logging: *default-logging
     ports:
       - "${CADDY_HTTP_PORT}:80"
       - "${CADDY_HTTPS_PORT}:443"
@@ -310,6 +432,7 @@ container_name() {
   case "$1" in
     provider) echo "audiobookshelf-provider" ;;
     caddy) echo "audiobookshelf-caddy" ;;
+    rclone) echo "audiobookshelf-rclone" ;;
     *) echo "audiobookshelf" ;;
   esac
 }
@@ -317,6 +440,7 @@ service_ref() {
   case "$1" in
     provider) echo "$PROVIDER_REF" ;;
     caddy) echo "$CADDY_REF" ;;
+    rclone) echo "$RCLONE_REF" ;;
     *) echo "$ABS_REF" ;;
   esac
 }
@@ -324,7 +448,7 @@ service_ref() {
 service_health_url() {
   case "$1" in
     provider) echo "http://127.0.0.1:${PROVIDER_PORT}/health" ;;
-    caddy) echo "docker" ;;
+    caddy|rclone) echo "docker" ;;
     *) echo "http://127.0.0.1:${ABS_PORT}/healthcheck" ;;
   esac
 }
@@ -469,7 +593,7 @@ for svc in "${RECREATE[@]}"; do
 done
 
 if [[ $FAILED -eq 1 ]]; then
-  log "To roll back: $SCRIPT_NAME --tag <previous tag or latest@sha256:<digest>> (or --provider-tag, --caddy-tag); config backups are in $ABS_BACKUP_DIR" >&2
+  log "To roll back: $SCRIPT_NAME --tag <previous tag or latest@sha256:<digest>> (or --provider-tag, --caddy-tag, --rclone-tag); config backups are in $ABS_BACKUP_DIR" >&2
   exit 1
 fi
 
@@ -480,4 +604,6 @@ else
   log "Done. Audiobookshelf: http://<server>:${ABS_PORT}/"
 fi
 [[ "$PROVIDER_ENABLED" == "true" ]] && log "Metadata provider: http://<server>:${PROVIDER_PORT}/ (in Audiobookshelf use http://provider:8000)"
+[[ "$RCLONE_ENABLED" == "true" ]] && log "rclone: ${RCLONE_REMOTE} mounted on ${RCLONE_MOUNT_POINT}, in Audiobookshelf /media"
+[[ "$RCLONE_ENABLED" != "true" && -n "$ABS_MEDIA_DIR" ]] && log "Media: ${ABS_MEDIA_DIR} is /media in Audiobookshelf"
 exit 0
