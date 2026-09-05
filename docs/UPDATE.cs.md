@@ -1,209 +1,215 @@
-# Instalace a aktualizace serveru Audiobookshelf (fork `dospe`)
+# Instalace a aktualizace serveru Audiobookshelf (fork `dospe`) v `/opt/audio`
 
-Tento návod popisuje, jak nainstalovat a průběžně aktualizovat serverovou část
-z tohoto forku pomocí Docker Compose a skriptu `scripts/update-server.sh`.
-Skript je idempotentní: můžete ho spouštět opakovaně (ručně i z cronu), a když
-není co dělat, nic nezmění.
+Tento návod popisuje nasazení a údržbu celého serverového stacku pomocí dvou
+skriptů z `scripts/`:
 
-## Co skript dělá
+| Skript | K čemu je |
+| --- | --- |
+| `deploy.sh` | První instalace nebo znovunasazení: založí `/opt/audio`, převezme data ze staré instalace, vytvoří konfiguraci a stack spustí. Umí i vzdálený režim přes SSH. |
+| `update-server.sh` | Běžná idempotentní aktualizace: stáhne nové image, zazálohuje config, znovu vytvoří jen změněné kontejnery, ověří health check. Vhodné pro cron. |
 
-1. Ověří, že je k dispozici `docker`, plugin `docker compose` a `curl`.
-2. Založí nasazovací složku (výchozí `/opt/audiobookshelf`) a v ní soubor `.env`
-   s výchozí konfigurací. Existující `.env` nikdy nepřepisuje.
-3. Založí chybějící datové složky (audioknihy, config, metadata, zálohy).
-4. Zapíše `docker-compose.yml`. Soubor je spravovaný skriptem a přepíše se jen
-   tehdy, když se jeho obsah liší (např. po změně skriptu). Vlastní úpravy
-   dělejte v `.env`, ne v compose souboru.
-5. Stáhne image `ghcr.io/dospe/audiobookshelf:<tag>`.
-6. Pokud běží kontejner se stejným image, skončí s hláškou „Already up to date“.
-7. Pokud je k dispozici nový image (nebo kontejner neběží, nebo byl použit
-   `--force`):
-   - zastaví server a zazálohuje složku `config` (databáze a nastavení) do
-     `config-<datum>.tar.gz` ve složce záloh, starší zálohy nad limit smaže,
-   - znovu vytvoří kontejner z nového image,
-   - počká, až server odpoví na `/healthcheck` (max. 120 s),
-   - odstraní staré nepoužívané image forku.
-8. Při selhání vypíše posledních 50 řádků logu a návod na rollback.
+Stack tvoří dvě služby v jednom Docker Compose projektu:
 
-Souběžné spuštění hlídá zámek `.update.lock`, druhá instance skončí chybou.
+| Služba | Image | Port na hostiteli | Poznámka |
+| --- | --- | --- | --- |
+| `audiobookshelf` | `ghcr.io/dospe/audiobookshelf` (tento fork) | `ABS_PORT`, výchozí 13378 | web UI a API |
+| `provider` | `ghcr.io/stecik/audiobookshelf_czech_metadata` | `PROVIDER_PORT`, výchozí 8000 | český metadata provider; ABS ho volá uvnitř compose sítě jako `http://provider:8000` |
+
+Oba image jsou veřejné, na serveru není potřeba žádné přihlášení k registru.
+
+## Rozložení `/opt/audio`
+
+| Cesta | Obsah |
+| --- | --- |
+| `/opt/audio/.env` | jediný konfigurační soubor obou služeb; vytvoří ho `deploy.sh`, dál se edituje ručně a nikdy se nepřepisuje |
+| `/opt/audio/docker-compose.yml` | generovaný skriptem `update-server.sh`, ručně neupravovat |
+| `/opt/audio/deploy.sh`, `/opt/audio/update-server.sh` | kopie skriptů, které `deploy.sh` nainstaluje |
+| `/opt/audio/config` | databáze a nastavení Audiobookshelf (zálohovat) |
+| `/opt/audio/metadata` | obálky, cache, streamy (lze znovu vygenerovat) |
+| `/opt/audio/backups` | zálohy configu z aktualizací (`config-<datum>.tar.gz`) |
+| `/opt/audio/audiobooks` | knihovna, pokud není v `.env` nastavena jiná cesta (`ABS_AUDIOBOOKS_DIR`) |
+| `/opt/audio/.update.lock` | zámek proti souběhu aktualizací |
 
 ## Požadavky
 
 - Linux s Dockerem 20.10+ a pluginem Docker Compose v2 (`docker compose version`).
-- `curl`, `tar`, `flock` (součást `util-linux`, na běžných distribucích je).
-- Uživatel, který skript spouští, musí smět používat Docker (skupina `docker`
-  nebo `sudo`).
-- Síťový přístup na `ghcr.io`. Balíček s image je veřejný, přihlášení k registru není potřeba.
+- `curl`, `tar`, `flock` (balík `util-linux`), volitelně `rsync` pro rychlejší migraci dat.
+- Root nebo `sudo` (skripty zapisují do `/opt/audio`; `deploy.sh` se sám znovu spustí přes `sudo`).
+- Síťový přístup na `ghcr.io`.
 
-Image se staví automaticky workflow „Build and Push Docker Image“ při každém
-pushi do `master`, který mění `client/`, `server/`, `index.js` nebo
-`package.json`. Tagy: `latest` a `edge` (master), `vX.Y.Z` (verze).
-
-## Přístup k image a ke skriptu
-
-- **Image** `ghcr.io/dospe/audiobookshelf` je veřejný balíček. `docker pull`,
-  `docker manifest inspect` (volba `--check`) i compose fungují bez
-  přihlášení; na serveru není potřeba žádný token ani `docker login`.
-- **Repozitář** `dospe/audiobookshelf` je soukromý. Týká se to jen stažení
-  samotného skriptu `update-server.sh` (a tohoto návodu); vlastní aktualizace
-  serveru repozitář nepotřebuje. Skript získáte jedním ze dvou způsobů:
-  1. zkopírováním přes `scp` z počítače, kde máte repozitář naklonovaný, nebo
-  2. stažením přes `curl` s tokenem GitHubu: Settings → Developer settings →
-     Personal access tokens → Tokens (classic) → Generate new token
-     s oprávněním `repo`. Token se použije jen jednorázově při stažení,
-     na serveru ho ukládat nemusíte.
-
-> Kdyby byl balíček později přepnutý zpět na private, přidejte tokenu
-> oprávnění `read:packages` a na serveru se přihlaste stejným uživatelem,
-> který skript spouští (u `sudo` a cronu je to root):
-> `echo "<token>" | sudo docker login ghcr.io -u dospe --password-stdin`.
-> Přihlášení se ukládá do `~/.docker/config.json` a je trvalé.
+Skripty jsou v soukromém repozitáři `dospe/audiobookshelf`, takže je na server
+dostanete buď přes `scp` z naklonovaného repozitáře, nebo přes `curl` s classic
+tokenem GitHubu s oprávněním `repo` (Settings → Developer settings →
+Personal access tokens → Tokens (classic)). Nejjednodušší je vzdálený režim
+`deploy.sh --remote`, který oba skripty přenese sám.
 
 ## První instalace
 
-```bash
-# 1. Skript stáhněte ze soukromého repozitáře (token s oprávněním repo),
-#    nebo ho na server zkopírujte přes scp z naklonovaného repozitáře
-sudo mkdir -p /opt/audiobookshelf
-sudo curl -fsSL -H "Authorization: token <token>" \
-  https://raw.githubusercontent.com/dospe/audiobookshelf/master/scripts/update-server.sh \
-  -o /opt/audiobookshelf/update-server.sh
-sudo chmod +x /opt/audiobookshelf/update-server.sh
-
-# 2. První spuštění vytvoří .env s výchozími hodnotami
-sudo /opt/audiobookshelf/update-server.sh
-```
-
-Varianta přes `scp` (bez tokenu):
+### Varianta A: vzdáleně z počítače s naklonovaným repozitářem
 
 ```bash
-scp scripts/update-server.sh <uživatel>@<server>:/tmp/
-sudo install -m 755 /tmp/update-server.sh /opt/audiobookshelf/update-server.sh
+cd audiobookshelf/scripts
+./deploy.sh --remote uzivatel@audio.example.cz
 ```
 
-Skript obsahuje vše potřebné, jiné soubory z repozitáře nepotřebuje.
+Skript zkopíruje `deploy.sh` a `update-server.sh` přes `scp`, spustí na serveru
+`deploy.sh` (přes `sudo`, pokud nejste root) a po skončení vypíše souhrn.
+Všechny volby níže lze předat i ve vzdáleném režimu, například
+`./deploy.sh --remote uzivatel@host --audiobooks /mnt/books --port 13378`.
 
-Skript při prvním běhu jen vytvoří `/opt/audiobookshelf/.env` a skončí, aby
-se nic nenainstalovalo s nesprávnými cestami. Otevřete ho a upravte cesty a
-port podle svého prostředí:
+### Varianta B: přímo na serveru
+
+```bash
+sudo mkdir -p /opt/audio
+# oba skripty zkopírujte do /opt/audio (scp) nebo stáhněte s tokenem:
+for f in deploy.sh update-server.sh; do
+  sudo curl -fsSL -H "Authorization: token <token>" \
+    "https://raw.githubusercontent.com/dospe/audiobookshelf/master/scripts/$f" \
+    -o "/opt/audio/$f"
+done
+sudo chmod +x /opt/audio/*.sh
+sudo /opt/audio/deploy.sh
+```
+
+### Co `deploy.sh` udělá
+
+1. Ověří `docker`, `docker compose`, `curl` a nainstaluje oba skripty do `/opt/audio`.
+2. **Migrace** (jen když `.env` ještě neexistuje a není zadáno `--no-migrate`):
+   - najde stávající kontejner `audiobookshelf` (z `docker run` nebo z jiného
+     compose projektu), přečte jeho mounty `/audiobooks`, `/config` a
+     `/metadata`; cestu ke knihovně převezme do `.env`, obsah `config` a
+     `metadata` zkopíruje do `/opt/audio` (z bind mountu i z pojmenovaného
+     svazku přes `docker cp`), kontejner zastaví a odstraní (svazky nemaže);
+   - bez kontejneru zkusí starou strukturu `/opt/audiobookshelf/{config,metadata}`;
+   - najde starý provider z původního `deploy.sh` v `~/abs-czech-metadata`
+     (v domovském adresáři uživatele i roota), převezme jeho `.env`
+     (`HOST_PORT` → `PROVIDER_PORT`, token, `ENABLE_*` …), starý compose
+     projekt zastaví a složku přejmenuje na `abs-czech-metadata.migrated-<datum>`.
+3. Vytvoří `/opt/audio/.env` (výchozí hodnoty + zjištěné cesty + importované
+   hodnoty provideru). Při dalších bězích `.env` zachová a jen do něj promítne
+   volby z příkazové řádky.
+4. Spustí `update-server.sh --force`: zapíše compose, stáhne oba image,
+   vytvoří kontejnery a počká na `/healthcheck` (ABS) a `/health` (provider).
+
+Kopírování dat probíhá jen do prázdné cílové složky; existující obsah
+`/opt/audio/config` se nikdy nepřepíše.
+
+### Volby `deploy.sh`
+
+| Volba | Význam |
+| --- | --- |
+| `--remote user@host` | Přenese skripty přes SSH a spustí nasazení na serveru. |
+| `--dir DIR` | Jiná nasazovací složka než `/opt/audio`. |
+| `--audiobooks PATH` | Cesta ke knihovně na hostiteli (jinak z migrace, jinak `DIR/audiobooks`). |
+| `--port N` | Port Audiobookshelf (výchozí 13378). |
+| `--provider-port N` | Port provideru (výchozí 8000). |
+| `--tag TAG`, `--provider-tag TAG` | Tagy image (výchozí `latest`). |
+| `--no-provider` | Provider nenasazovat (`PROVIDER_ENABLED=false`). |
+| `--no-migrate` | Nehledat starou instalaci. |
+
+### Po instalaci
+
+1. Otevřete `http://<server>:13378/`. Při migraci se přihlásíte původními účty;
+   při čisté instalaci projdete průvodcem.
+2. Knihovna má uvnitř kontejneru cestu `/audiobooks`; při čisté instalaci ji
+   v ABS založte s touto cestou.
+3. Provider přidejte v ABS: Nastavení → Metadata Tools → Custom Metadata
+   Providers → Add, Media Type `Book`, URL `http://provider:8000`.
+   Authorization header vyplňte jen tehdy, když je v `.env` nastaven
+   `AUDIOBOOKSHELF_AUTH_TOKEN`. Pro samostatné zdroje lze přidat další
+   providery s URL `http://provider:8000/<zdroj>` (např. `/audioteka`).
+4. Spusťte sken knihovny, aby se soubory `.doc`, `.docx`, `.rtf` a `.pdb`
+   zaevidovaly jako e-knihy.
+
+## Konfigurace `.env`
 
 ```dotenv
+# --- Audiobookshelf server (fork image) ---
 ABS_IMAGE=ghcr.io/dospe/audiobookshelf
-ABS_TAG=latest
+ABS_TAG=latest                      # edge, vX.Y.Z, nebo latest@sha256:<digest>
 ABS_PORT=13378
-ABS_AUDIOBOOKS_DIR=/srv/audiobookshelf/audiobooks
-ABS_CONFIG_DIR=/srv/audiobookshelf/config
-ABS_METADATA_DIR=/srv/audiobookshelf/metadata
-ABS_BACKUP_DIR=/srv/audiobookshelf/backups
+ABS_AUDIOBOOKS_DIR=/opt/audio/audiobooks
+ABS_CONFIG_DIR=/opt/audio/config
+ABS_METADATA_DIR=/opt/audio/metadata
+ABS_BACKUP_DIR=/opt/audio/backups
 ABS_BACKUP_KEEP=7
 ABS_TZ=Europe/Prague
-ABS_PUID=1000
+ABS_PUID=1000                       # id -u uživatele s právy ke knihovně
 ABS_PGID=1000
+
+# --- Czech metadata provider ---
+PROVIDER_ENABLED=true
+PROVIDER_IMAGE=ghcr.io/stecik/audiobookshelf_czech_metadata
+PROVIDER_TAG=latest
+PROVIDER_PORT=8000
+LOG_LEVEL=INFO
+REQUEST_TIMEOUT_SECONDS=5
+SCRAPER_TIMEOUT_SECONDS=5
+AUDIOBOOKSHELF_AUTH_TOKEN=
+SCRAPER_USER_AGENT=
+ENABLE_ALZA=true
+# ... ENABLE_<zdroj>=true/false pro každý obchod, ENABLE_DATABAZEKNIH=false
 ```
 
-Poznámky:
-
-- `ABS_AUDIOBOOKS_DIR` nasměrujte na existující knihovnu; do kontejneru se
-  připojí jako `/audiobooks`. V nastavení knihovny v Audiobookshelf pak
-  používejte cestu `/audiobooks/...`.
-- `ABS_PUID`/`ABS_PGID` musí odpovídat uživateli, který má právo číst
-  audioknihy a zapisovat do `config` a `metadata` (`id -u`, `id -g`).
-- Skript spouštějte vždy stejným uživatelem, aby vytvořené složky a zálohy měly
-  konzistentní vlastníka.
-
-Po úpravě `.env` skript spusťte znovu; teď už stáhne image, vytvoří kontejner
-a počká na `/healthcheck`:
-
-```bash
-sudo /opt/audiobookshelf/update-server.sh
-```
-
-Web UI běží na `http://<server>:13378/`.
-
-## Přechod z oficiálního image `advplyr/audiobookshelf`
-
-Data (config, metadata) jsou s forkem kompatibilní, databáze se neměnila.
-
-1. Zastavte a odstraňte původní kontejner (nebo `docker compose down` v původní
-   složce). Svazky s daty nemažte.
-2. V `.env` nastavte `ABS_CONFIG_DIR`, `ABS_METADATA_DIR` a `ABS_AUDIOBOOKS_DIR`
-   na stejné hostitelské cesty, jaké používal původní kontejner, a `ABS_PORT`
-   na původní port.
-3. Spusťte `update-server.sh`.
-4. Po naběhnutí spusťte v Audiobookshelf sken knihovny, aby se soubory
-   `.doc`, `.docx`, `.rtf` a `.pdb` zaevidovaly jako e-knihy.
-
-Pokud jste původně používali pojmenované Docker svazky místo složek, nejdřív
-jejich obsah zkopírujte do složek (`docker cp` nebo `docker run --rm -v ...`).
+Změna hodnot v `.env` se projeví při dalším běhu `update-server.sh`
+(compose změnu portů a cest pozná a kontejner znovu vytvoří); pro jistotu
+lze spustit `update-server.sh --force`.
 
 ## Běžná aktualizace
 
 ```bash
-sudo /opt/audiobookshelf/update-server.sh
+sudo /opt/audio/update-server.sh
 ```
 
 Typický výstup, když je vše aktuální:
 
 ```
-[2026-09-05 06:00:01] Deployment directory: /opt/audiobookshelf
-[2026-09-05 06:00:01] Image: ghcr.io/dospe/audiobookshelf:latest
-[2026-09-05 06:00:01] Container: running (image 2f1c9a7b3d4e)
-[2026-09-05 06:00:01] Pulling ghcr.io/dospe/audiobookshelf:latest
-[2026-09-05 06:00:04] Already up to date, nothing to do
+[...] Deployment directory: /opt/audio
+[...] audiobookshelf: image ghcr.io/dospe/audiobookshelf:latest, container running (image 2f1c9a7b3d4e)
+[...] provider: image ghcr.io/stecik/audiobookshelf_czech_metadata:latest, container running (image 9c8d7e6f5a4b)
+[...] Pulling ghcr.io/dospe/audiobookshelf:latest
+[...] Pulling ghcr.io/stecik/audiobookshelf_czech_metadata:latest
+[...] Already up to date, nothing to do
 ```
 
-Když je nová verze:
+Když je nová verze Audiobookshelf:
 
 ```
-[...] Update needed: new image 8a0b1c2d3e4f (running 2f1c9a7b3d4e)
-[...] Backing up /srv/audiobookshelf/config to /srv/audiobookshelf/backups/config-20260905-060004.tar.gz
-[...] Starting container
+[...] audiobookshelf: update needed: new image 8a0b1c2d3e4f (running 2f1c9a7b3d4e)
+[...] Backing up /opt/audio/config to /opt/audio/backups/config-20260905-060004.tar.gz
+[...] Starting: audiobookshelf
 [...] Waiting for http://127.0.0.1:13378/healthcheck
-[...] Audiobookshelf is up (container 5b6c7d8e9f01, image 8a0b1c2d3e4f)
-[...] Done. Open http://<server>:13378/ and run a library scan if new ebook formats should be picked up.
+[...] audiobookshelf is up
+[...] Done. Audiobookshelf: http://<server>:13378/
 ```
 
-Během aktualizace je server nedostupný zhruba 10 až 60 sekund (záloha +
-restart).
+Znovu se vytvoří jen služba, jejíž image se změnil. Záloha configu se dělá
+jen před aktualizací Audiobookshelf (provider nemá žádný stav). Během
+aktualizace je daná služba nedostupná zhruba 10 až 60 sekund.
 
-### Jen zjistit, jestli je aktualizace
-
-```bash
-sudo /opt/audiobookshelf/update-server.sh --check
-```
-
-Nic nemění, jen porovná digest image na ghcr s lokálním. Návratový kód:
-`0` = aktuální, `2` = je k dispozici aktualizace (nebo není nainstalováno),
-`1` = chyba (např. nedostupný registr).
-
-### Volby
+### Volby `update-server.sh`
 
 | Volba | Význam |
 | --- | --- |
-| `--check` | Pouze zjistí, zda existuje novější image. |
-| `--force` | Znovu vytvoří kontejner i bez nového image (např. po změně `.env`). |
-| `--no-backup` | Přeskočí zálohu configu pro tento běh. |
-| `--tag TAG` | Nasadí jiný tag a uloží ho do `.env` jako `ABS_TAG`. |
-| `--dir DIR` | Jiná nasazovací složka než `/opt/audiobookshelf`. |
-
-Změna portu nebo cest v `.env` se aplikuje při dalším běhu skriptu (compose si
-změny sám všimne a kontejner znovu vytvoří).
+| `--check` | Jen porovná digesty na ghcr s lokálními; nic nemění. Návratový kód `0` = aktuální, `2` = je aktualizace (nebo není nainstalováno), `1` = chyba. |
+| `--service audiobookshelf` / `--service provider` | Aktualizuje jen jednu službu. |
+| `--force` | Znovu vytvoří kontejnery i bez nového image (např. po změně `.env`). |
+| `--no-backup` | Přeskočí zálohu configu. |
+| `--tag TAG` | Tag Audiobookshelf; uloží se do `.env` jako `ABS_TAG`. |
+| `--provider-tag TAG` | Tag provideru; uloží se jako `PROVIDER_TAG`. |
+| `--dir DIR` | Jiná nasazovací složka. |
 
 ## Automatická aktualizace
 
 ### cron
-
-Denně v 5:00, s logem:
 
 ```bash
 sudo crontab -e
 ```
 
 ```
-0 5 * * * /opt/audiobookshelf/update-server.sh >> /var/log/audiobookshelf-update.log 2>&1
+0 5 * * * /opt/audio/update-server.sh >> /var/log/audiobookshelf-update.log 2>&1
 ```
-
-Díky idempotenci skript ve dnech bez nové verze jen stáhne manifest a skončí.
 
 ### systemd timer
 
@@ -211,13 +217,13 @@ Díky idempotenci skript ve dnech bez nové verze jen stáhne manifest a skonč�
 
 ```ini
 [Unit]
-Description=Update Audiobookshelf server
+Description=Update Audiobookshelf stack
 After=docker.service
 Requires=docker.service
 
 [Service]
 Type=oneshot
-ExecStart=/opt/audiobookshelf/update-server.sh
+ExecStart=/opt/audio/update-server.sh
 ```
 
 `/etc/systemd/system/audiobookshelf-update.timer`:
@@ -238,78 +244,52 @@ WantedBy=timers.target
 ```bash
 sudo systemctl daemon-reload
 sudo systemctl enable --now audiobookshelf-update.timer
-journalctl -u audiobookshelf-update.service   # log posledních běhů
+journalctl -u audiobookshelf-update.service
 ```
 
 ## Rollback
 
 ### Na předchozí image
 
-Každý image na ghcr má digest. Zjistíte ho ze stránky balíčku na GitHubu nebo
-lokálně:
-
 ```bash
 docker images --digests ghcr.io/dospe/audiobookshelf
+sudo /opt/audio/update-server.sh --tag "latest@sha256:<digest>"
 ```
 
-Nasazení konkrétního digestu:
-
-```bash
-sudo /opt/audiobookshelf/update-server.sh --tag "latest@sha256:<digest>"
-```
-
-Tag se uloží do `.env`, takže další běhy skriptu zůstanou na této verzi.
-Návrat na průběžné aktualizace: `--tag latest`.
-
-Verze označené tagem lze nasadit přímo: `--tag v2.36.0`.
+Tag se uloží do `.env`, takže další běhy zůstanou na této verzi; návrat na
+průběžné aktualizace je `--tag latest`. Pro provider stejně s
+`--provider-tag`.
 
 ### Obnova databáze ze zálohy
 
-Zálohy configu jsou v `ABS_BACKUP_DIR` jako `config-<datum>.tar.gz`
-(obsahují celou složku `config` včetně `absdatabase.sqlite`).
-
 ```bash
-cd /opt/audiobookshelf
+cd /opt/audio
 docker compose stop audiobookshelf
-mv /srv/audiobookshelf/config /srv/audiobookshelf/config.broken
-tar -xzf /srv/audiobookshelf/backups/config-20260905-060004.tar.gz -C /srv/audiobookshelf
+mv /opt/audio/config /opt/audio/config.broken
+tar -xzf /opt/audio/backups/config-20260905-060004.tar.gz -C /opt/audio
 docker compose start audiobookshelf
 ```
 
-Zálohu obnovujte vždy se stejnou nebo starší verzí serveru, než se kterou
-vznikla; novější server může databázi migrovat a starší verze ji pak
-neotevře.
+Zálohu obnovujte se stejnou nebo starší verzí serveru, než se kterou vznikla;
+novější server databázi migruje a starší verze ji pak neotevře.
 
-## Ověření po aktualizaci
+## Ověření
 
-- `http://<server>:13378/healthcheck` vrací HTTP 200.
-- V UI v Nastavení → O aplikaci (nebo v patičce) je verze `2.36.0` nebo vyšší.
-- `docker compose -f /opt/audiobookshelf/docker-compose.yml logs --tail 100`
-  neobsahuje chyby při startu.
-- Po první aktualizaci na tento fork spusťte sken knihovny; soubory
-  `.doc/.docx/.rtf/.pdb` se objeví u knih jako e-knihy s tlačítkem Číst.
+- `http://<server>:13378/healthcheck` vrací HTTP 200; `http://<server>:8000/health` také.
+- `docker compose -f /opt/audio/docker-compose.yml ps` ukazuje obě služby jako `healthy`.
+- V ABS proběhne vyhledání metadat přes provider (Match u libovolné knihy).
+- `docker compose -f /opt/audio/docker-compose.yml logs --tail 100` bez chyb.
 
 ## Řešení potíží
 
 | Příznak | Příčina a řešení |
 | --- | --- |
-| `pull failed` / `denied` / `unauthorized` | Balíček je veřejný, takže nejčastěji jde o výpadek sítě nebo ghcr.io; zkuste znovu. Pokud byl balíček přepnutý na private, přihlaste se podle poznámky v kapitole „Přístup k image a ke skriptu“. |
-| `curl: (404)` při stahování skriptu | Repozitář je soukromý; přidejte hlavičku `Authorization: token <token>` (oprávnění `repo`) nebo skript zkopírujte přes `scp`. |
-| `cannot talk to the Docker daemon` | Spusťte se `sudo`, nebo přidejte uživatele do skupiny `docker` a znovu se přihlaste. |
+| `pull failed` / `denied` / `unauthorized` | Výpadek sítě nebo ghcr.io; zkuste znovu. Pokud by byl některý balíček přepnut na private, přihlaste se `docker login ghcr.io` jako uživatel, který skript spouští (u `sudo` a cronu root), s tokenem `read:packages`. |
+| `curl: (404)` při stahování skriptů | Repozitář je soukromý; použijte hlavičku `Authorization: token <token>` (oprávnění `repo`), `scp`, nebo `deploy.sh --remote`. |
+| `cannot talk to the Docker daemon` | Docker neběží nebo chybí práva; spusťte se `sudo`. |
 | `another update-server.sh is already running` | Běží jiná instance (cron). Počkejte, nebo smažte `.update.lock`, pokud proces prokazatelně neběží. |
-| Server nenaběhne do 120 s | Podívejte se do vypsaného logu. Nejčastěji obsazený port (`ABS_PORT`) nebo práva k `config`/`metadata` (`ABS_PUID`/`ABS_PGID`). |
-| Knihovna je prázdná po přechodu z oficiálního image | `ABS_CONFIG_DIR` míří jinam než původní config. Zkontrolujte cesty v `.env` a `--force`. |
-| Nové formáty se v knihovně neukazují | Spusťte sken knihovny (Nastavení knihovny → Scan). Kontroluje se přípona souboru. |
+| Služba nenaběhne do 120 s | Podívejte se do vypsaného logu. Nejčastěji obsazený port (`ABS_PORT`, `PROVIDER_PORT`) nebo práva k `config`/`metadata` (`ABS_PUID`/`ABS_PGID`). |
+| Po migraci je knihovna prázdná | `ABS_CONFIG_DIR` míří jinam než původní config, nebo se kopírovalo do neprázdné složky (skript ji nechal být). Zkontrolujte `.env` a obsah `/opt/audio/config`. |
+| ABS nenajde provider | V ABS musí být URL `http://provider:8000` (název služby v compose síti), ne `localhost`. Pokud běží ABS mimo tento compose, použijte `http://<server>:8000`. |
+| Provider vrací prázdné výsledky | ABS má limit 10 s na metadata; snižte `REQUEST_TIMEOUT_SECONDS`/`SCRAPER_TIMEOUT_SECONDS` (max. 8) nebo vypněte pomalé zdroje `ENABLE_*=false`. |
 | `--check` hlásí chybu manifestu | `docker manifest inspect` potřebuje síť; zkontrolujte připojení k ghcr.io. |
-
-## Kde je co
-
-| Cesta | Obsah |
-| --- | --- |
-| `/opt/audiobookshelf/update-server.sh` | tento skript |
-| `/opt/audiobookshelf/.env` | konfigurace nasazení (jediný soubor k ruční editaci) |
-| `/opt/audiobookshelf/docker-compose.yml` | generovaný compose soubor |
-| `/opt/audiobookshelf/.update.lock` | zámek proti souběhu |
-| `ABS_CONFIG_DIR` | databáze a nastavení serveru (zálohovat) |
-| `ABS_METADATA_DIR` | obálky, cache, streamy (lze znovu vygenerovat) |
-| `ABS_BACKUP_DIR` | zálohy configu z aktualizací |
