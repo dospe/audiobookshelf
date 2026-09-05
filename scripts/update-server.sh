@@ -204,7 +204,7 @@ if [[ $CHECK_ONLY -eq 1 ]]; then
   REMOTE_DIGEST="$(docker manifest inspect "$IMAGE_REF" 2>/dev/null | grep -m1 -o '"digest": *"sha256:[0-9a-f]*"' | grep -o 'sha256:[0-9a-f]*' || true)"
   LOCAL_DIGEST="$(image_digest "$IMAGE_REF" | grep -o 'sha256:[0-9a-f]*' || true)"
   if [[ -z "$REMOTE_DIGEST" ]]; then
-    die "cannot read the remote manifest of $IMAGE_REF (private package or no network? try: docker login ghcr.io)"
+    die "cannot read the remote manifest of $IMAGE_REF (private package: run 'docker login ghcr.io -u <github user>' as the user running this script with a token that has read:packages; or no network)"
   fi
   if [[ -z "$LOCAL_IMAGE_ID_BEFORE" || -z "$CONTAINER_ID" ]]; then
     log "Not installed yet, run without --check to install"
@@ -223,7 +223,7 @@ fi
 # ---------------------------------------------------------------------------
 log "Pulling $IMAGE_REF"
 if ! compose pull --quiet 2>/dev/null; then
-  compose pull || die "pull failed (private package? run: docker login ghcr.io -u <github user> with a token that has read:packages)"
+  compose pull || die "pull failed (the package is private: run 'docker login ghcr.io -u <github user>' as the user running this script, e.g. root under sudo/cron, with a token that has read:packages)"
 fi
 LOCAL_IMAGE_ID_AFTER="$(image_id "$IMAGE_REF")"
 [[ -n "$LOCAL_IMAGE_ID_AFTER" ]] || die "image $IMAGE_REF is not available after pull"

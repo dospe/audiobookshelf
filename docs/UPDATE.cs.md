@@ -33,30 +33,56 @@ Souběžné spuštění hlídá zámek `.update.lock`, druhá instance skončí 
 - `curl`, `tar`, `flock` (součást `util-linux`, na běžných distribucích je).
 - Uživatel, který skript spouští, musí smět používat Docker (skupina `docker`
   nebo `sudo`).
-- Síťový přístup na `ghcr.io`.
+- Síťový přístup na `ghcr.io` a token GitHubu (viz další kapitola).
 
 Image se staví automaticky workflow „Build and Push Docker Image“ při každém
 pushi do `master`, který mění `client/`, `server/`, `index.js` nebo
 `package.json`. Tagy: `latest` a `edge` (master), `vX.Y.Z` (verze).
 
-> Pokud je balíček na ghcr soukromý, `docker pull` bez přihlášení selže.
-> Buď balíček `audiobookshelf` nastavte v GitHubu (Packages → Package settings →
-> Danger zone → Change visibility) jako **public**, nebo se na serveru jednou
-> přihlaste: `docker login ghcr.io -u <github uživatel>` s tokenem, který má
-> oprávnění `read:packages`.
+## Přístupový token (repozitář i balíček jsou soukromé)
+
+Repozitář `dospe/audiobookshelf` i balíček `ghcr.io/dospe/audiobookshelf`
+jsou soukromé, takže server potřebuje token GitHubu:
+
+1. GitHub → Settings → Developer settings → Personal access tokens →
+   **Tokens (classic)** → Generate new token. Zaškrtněte `read:packages`
+   (stažení image) a `repo` (stažení skriptu ze soukromého repozitáře).
+   Fine-grained tokeny zatím k balíčkům na ghcr přístup nedávají, použijte
+   classic.
+2. Token si uložte, GitHub ho zobrazí jen jednou.
+3. Na serveru se přihlaste k ghcr **stejným uživatelem, který bude skript
+   spouštět** (přihlášení se ukládá do `~/.docker/config.json` daného
+   uživatele; při spouštění přes `sudo` nebo z root cronu je to `root`):
+
+```bash
+echo "<token>" | sudo docker login ghcr.io -u dospe --password-stdin
+```
+
+Přihlášení je trvalé, opakuje se jen po změně tokenu. `docker pull`,
+`docker manifest inspect` (volba `--check`) i compose pak token používají
+automaticky.
+
+> Alternativa bez tokenu na serveru: nastavit balíček `audiobookshelf` jako
+> public (GitHub → Packages → Package settings → Danger zone → Change
+> visibility). Repozitář může zůstat soukromý, viditelnost balíčku je
+> nezávislá.
 
 ## První instalace
 
 ```bash
-# 1. Skript stáhněte (nebo naklonujte repozitář)
+# 1. Skript stáhněte ze soukromého repozitáře (token s oprávněním repo)
 sudo mkdir -p /opt/audiobookshelf
-sudo curl -fsSL https://raw.githubusercontent.com/dospe/audiobookshelf/master/scripts/update-server.sh \
+sudo curl -fsSL -H "Authorization: token <token>" \
+  https://raw.githubusercontent.com/dospe/audiobookshelf/master/scripts/update-server.sh \
   -o /opt/audiobookshelf/update-server.sh
 sudo chmod +x /opt/audiobookshelf/update-server.sh
 
 # 2. První spuštění vytvoří .env s výchozími hodnotami
 sudo /opt/audiobookshelf/update-server.sh
 ```
+
+Skript můžete na server také zkopírovat přes `scp` z naklonovaného
+repozitáře; obsahuje vše potřebné, jiné soubory z repa nepotřebuje.
 
 Skript při prvním běhu jen vytvoří `/opt/audiobookshelf/.env` a skončí, aby
 se nic nenainstalovalo s nesprávnými cestami. Otevřete ho a upravte cesty a
@@ -268,7 +294,8 @@ neotevře.
 
 | Příznak | Příčina a řešení |
 | --- | --- |
-| `pull failed` / `denied` | Balíček na ghcr je soukromý. Nastavte ho jako public nebo `docker login ghcr.io` s tokenem `read:packages`. |
+| `pull failed` / `denied` / `unauthorized` | Balíček na ghcr je soukromý a uživatel, který skript spouští, není přihlášený. Spusťte `docker login ghcr.io` jako tento uživatel (u `sudo` a cronu jako root) s tokenem `read:packages`, viz „Přístupový token“. Token mohl také vypršet. |
+| `curl: (404)` při stahování skriptu | Repozitář je soukromý; přidejte hlavičku `Authorization: token <token>` (oprávnění `repo`) nebo skript zkopírujte přes `scp`. |
 | `cannot talk to the Docker daemon` | Spusťte se `sudo`, nebo přidejte uživatele do skupiny `docker` a znovu se přihlaste. |
 | `another update-server.sh is already running` | Běží jiná instance (cron). Počkejte, nebo smažte `.update.lock`, pokud proces prokazatelně neběží. |
 | Server nenaběhne do 120 s | Podívejte se do vypsaného logu. Nejčastěji obsazený port (`ABS_PORT`) nebo práva k `config`/`metadata` (`ABS_PUID`/`ABS_PGID`). |
