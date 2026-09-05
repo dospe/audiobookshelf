@@ -619,6 +619,8 @@
   "LabelSettingsSkipMatchingBooksWithISBN": "Skip matching books that already have an ISBN",
   "LabelSettingsSortingIgnorePrefixes": "Ignore prefixes when sorting",
   "LabelSettingsSortingIgnorePrefixesHelp": "i.e. for prefix \"the\" book title \"The Book Title\" would sort as \"Book Title, The\"",
+  "LabelSettingsSplitEbooksByFile": "Split folders with multiple ebooks into separate books",
+  "LabelSettingsSplitEbooksByFileHelp": "When a folder has no audio files and contains two or more ebooks, each ebook becomes its own book. Files with the same name (Book.epub, Book.pdf, Book.opf, Book.jpg) stay together as one book. Author and series are read from the folder names above the file. Has no effect when Audiobooks only is enabled.",
   "LabelSettingsSquareBookCovers": "Use square book covers",
   "LabelSettingsSquareBookCoversHelp": "Prefer to use square covers over standard 1.6:1 book covers",
   "LabelSettingsStoreCoversWithItem": "Store covers with item",

@@ -55,6 +55,22 @@ function ensureUserCanAccessLibraryItemsForBatch(req, res, libraryItems) {
   return true
 }
 
+/**
+ * Delete the files of a library item from the file system
+ * A single media file library item can own more files (other ebook formats, opf, cover) which are removed with it
+ *
+ * @param {import('../models/LibraryItem')} libraryItem
+ */
+async function removeLibraryItemFiles(libraryItem) {
+  const paths = libraryItem.isFile && libraryItem.libraryFiles?.length ? libraryItem.libraryFiles.map((lf) => lf.metadata.path) : [libraryItem.path]
+  for (const path of paths) {
+    Logger.info(`[LibraryItemController] Deleting library item from file system at "${path}"`)
+    await fs.remove(path).catch((error) => {
+      Logger.error(`[LibraryItemController] Failed to delete library item from file system at "${path}"`, error)
+    })
+  }
+}
+
 class LibraryItemController {
   constructor() {}
 
@@ -113,7 +129,6 @@ class LibraryItemController {
    */
   async delete(req, res) {
     const hardDelete = req.query.hard == 1 // Delete from file system
-    const libraryItemPath = req.libraryItem.path
 
     const mediaItemIds = []
     const authorIds = []
@@ -132,10 +147,7 @@ class LibraryItemController {
 
     await this.handleDeleteLibraryItem(req.libraryItem.id, mediaItemIds, req.libraryItem.libraryId)
     if (hardDelete) {
-      Logger.info(`[LibraryItemController] Deleting library item from file system at "${libraryItemPath}"`)
-      await fs.remove(libraryItemPath).catch((error) => {
-        Logger.error(`[LibraryItemController] Failed to delete library item from file system at "${libraryItemPath}"`, error)
-      })
+      await removeLibraryItemFiles(req.libraryItem)
     }
 
     if (authorIds.length) {
@@ -178,13 +190,18 @@ class LibraryItemController {
 
     try {
       // If library item is a single file in root dir then no need to zip
-      if (req.libraryItem.isFile) {
+      if (req.libraryItem.isFile && req.libraryItem.libraryFiles?.length > 1) {
+        // Ebook owning more files with the same name (other formats, opf, cover)
+        const filename = `${itemTitle}.zip`
+        const pathObjects = req.libraryItem.libraryFiles.map((lf) => ({ path: lf.metadata.path, isFile: true }))
+        await zipHelpers.zipDirectoriesPipe(pathObjects, filename, res)
+      } else if (req.libraryItem.isFile) {
         // Express does not set the correct mimetype for m4b files so use our defined mimetypes if available
         const audioMimeType = getAudioMimeTypeFromExtname(Path.extname(libraryItemPath))
         if (audioMimeType) {
           res.setHeader('Content-Type', audioMimeType)
         }
-        await new Promise((resolve, reject) => res.download(libraryItemPath, req.libraryItem.relPath, (error) => (error ? reject(error) : resolve())))
+        await new Promise((resolve, reject) => res.download(libraryItemPath, Path.basename(req.libraryItem.relPath), (error) => (error ? reject(error) : resolve())))
       } else {
         const filename = `${itemTitle}.zip`
         await zipHelpers.zipDirectoryPipe(libraryItemPath, filename, res)
@@ -579,7 +596,6 @@ class LibraryItemController {
     const libraryId = itemsToDelete[0].libraryId
 
     for (const libraryItem of itemsToDelete) {
-      const libraryItemPath = libraryItem.path
       Logger.info(`[LibraryItemController] (${hardDelete ? 'Hard' : 'Soft'}) deleting Library Item "${libraryItem.media.title}" with id "${libraryItem.id}"`)
       const mediaItemIds = []
       const seriesIds = []
@@ -597,10 +613,7 @@ class LibraryItemController {
       }
       await this.handleDeleteLibraryItem(libraryItem.id, mediaItemIds, libraryItem.libraryId)
       if (hardDelete) {
-        Logger.info(`[LibraryItemController] Deleting library item from file system at "${libraryItemPath}"`)
-        await fs.remove(libraryItemPath).catch((error) => {
-          Logger.error(`[LibraryItemController] Failed to delete library item from file system at "${libraryItemPath}"`, error)
-        })
+        await removeLibraryItemFiles(libraryItem)
       }
       if (seriesIds.length) {
         await this.checkRemoveEmptySeries(seriesIds)
@@ -837,11 +850,7 @@ class LibraryItemController {
 
     const libraryId = libraryItems[0].libraryId
     for (const libraryItem of libraryItems) {
-      if (libraryItem.isFile) {
-        Logger.warn(`[LibraryItemController] Re-scanning file library items not yet supported`)
-      } else {
-        await LibraryItemScanner.scanLibraryItem(libraryItem.id)
-      }
+      await LibraryItemScanner.scanLibraryItem(libraryItem.id)
     }
 
     await Database.resetLibraryIssuesFilterData(libraryId)
@@ -857,11 +866,6 @@ class LibraryItemController {
     if (!req.user.isAdminOrUp) {
       Logger.error(`[LibraryItemController] Non-admin user "${req.user.username}" attempted to scan library item`)
       return res.sendStatus(403)
-    }
-
-    if (req.libraryItem.isFile) {
-      Logger.error(`[LibraryItemController] Re-scanning file library items not yet supported`)
-      return res.sendStatus(500)
     }
 
     const result = await LibraryItemScanner.scanLibraryItem(req.libraryItem.id)

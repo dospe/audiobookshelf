@@ -27,6 +27,15 @@
           </p>
         </ui-tooltip>
       </div>
+      <div v-if="isBookLibrary" class="flex items-center p-2 w-full md:w-1/2">
+        <ui-toggle-switch v-model="splitEbooksByFile" size="sm" @input="formUpdated" />
+        <ui-tooltip :text="$strings.LabelSettingsSplitEbooksByFileHelp">
+          <p class="pl-4 text-sm">
+            {{ $strings.LabelSettingsSplitEbooksByFile }}
+            <span class="material-symbols icon-text text-sm">info</span>
+          </p>
+        </ui-tooltip>
+      </div>
       <div v-if="isBookLibrary" class="p-2 w-full md:w-1/2">
         <div class="flex items-center">
           <ui-toggle-switch v-model="skipMatchingMediaWithAsin" size="sm" @input="formUpdated" />
@@ -109,6 +118,7 @@ export default {
       skipMatchingMediaWithAsin: false,
       skipMatchingMediaWithIsbn: false,
       audiobooksOnly: false,
+      splitEbooksByFile: true,
       epubsAllowScriptedContent: false,
       hideSingleBookSeries: false,
       onlyShowLaterBooksInContinueSeries: false,
@@ -167,6 +177,7 @@ export default {
           skipMatchingMediaWithAsin: !!this.skipMatchingMediaWithAsin,
           skipMatchingMediaWithIsbn: !!this.skipMatchingMediaWithIsbn,
           audiobooksOnly: !!this.audiobooksOnly,
+          splitEbooksByFile: !!this.splitEbooksByFile,
           epubsAllowScriptedContent: !!this.epubsAllowScriptedContent,
           hideSingleBookSeries: !!this.hideSingleBookSeries,
           onlyShowLaterBooksInContinueSeries: !!this.onlyShowLaterBooksInContinueSeries,
@@ -185,6 +196,7 @@ export default {
       this.skipMatchingMediaWithAsin = !!this.librarySettings.skipMatchingMediaWithAsin
       this.skipMatchingMediaWithIsbn = !!this.librarySettings.skipMatchingMediaWithIsbn
       this.audiobooksOnly = !!this.librarySettings.audiobooksOnly
+      this.splitEbooksByFile = this.librarySettings.splitEbooksByFile !== false
       this.epubsAllowScriptedContent = !!this.librarySettings.epubsAllowScriptedContent
       this.hideSingleBookSeries = !!this.librarySettings.hideSingleBookSeries
       this.onlyShowLaterBooksInContinueSeries = !!this.librarySettings.onlyShowLaterBooksInContinueSeries

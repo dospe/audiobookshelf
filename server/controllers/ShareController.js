@@ -260,7 +260,7 @@ class ShareController {
         if (audioMimeType) {
           res.setHeader('Content-Type', audioMimeType)
         }
-        await new Promise((resolve, reject) => res.download(itemPath, libraryItem.relPath, (error) => (error ? reject(error) : resolve())))
+        await new Promise((resolve, reject) => res.download(itemPath, Path.basename(libraryItem.relPath), (error) => (error ? reject(error) : resolve())))
       } else {
         const filename = `${itemTitle}.zip`
         await zipHelpers.zipDirectoryPipe(itemPath, filename, res)
