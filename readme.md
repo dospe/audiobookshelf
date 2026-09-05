@@ -12,6 +12,20 @@
   </p>
 </div>
 
+# About this fork
+
+This is [dospe](https://github.com/dospe)'s fork of [advplyr/audiobookshelf](https://github.com/advplyr/audiobookshelf), kept close to upstream and deployed as a Docker stack in `/opt/audio` together with a Czech metadata provider. Fork versions are `<upstream version>-dospe.<n>` (for example `2.36.0-dospe.1`): the first part is the upstream release the fork is based on, the suffix grows with every fork change. The update check in the web client still compares against upstream releases.
+
+What differs from upstream:
+
+- `doc`, `docx`, `rtf` and `pdb` files are treated as ebooks, the web reader displays them and remembers display and text encoding settings per book
+- A directory holding several ebooks is scanned as one library item per book (library setting "Split folders with multiple ebooks into separate books", on by default); files sharing a name without extension stay together as one book, author and series come from the parent folders
+- The response timeout of custom metadata providers is configurable (`CUSTOM_METADATA_PROVIDER_TIMEOUT`, default 30 s)
+- The Docker image is built from this repository and published as `ghcr.io/dospe/audiobookshelf` (`latest`, `edge` and the fork version)
+- Deployment and update scripts in `scripts/` (`deploy.sh`, `update-server.sh`) for the `/opt/audio` stack: Audiobookshelf, the Czech metadata provider, Caddy HTTPS reverse proxy and an rclone mount
+
+Fork documentation (Czech): [docs/UPDATE.cs.md](docs/UPDATE.cs.md) (install and update), [docs/EBOOKS.cs.md](docs/EBOOKS.cs.md) (ebook folders and Calibre), [CHANGELOG.md](CHANGELOG.md).
+
 ## ⚠️ Frontend pull requests are not being reviewed or merged for the existing Vue frontend. The frontend is currently being rewritten and migrated to React and should be available soon.
 
 # About
