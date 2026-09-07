@@ -214,6 +214,12 @@ class MediaProgress extends Model {
    */
   async applyProgressUpdate(progressPayload) {
     if (!this.extraData) this.extraData = {}
+    // A payload carrying only ebookSettings changes how the book is displayed,
+    // not how far it was read. Saved silently so updatedAt (lastUpdate for the
+    // clients) stays with the last position update - otherwise a reading
+    // position saved elsewhere (the local db of a phone) would lose against
+    // the unchanged server position just because it is "older"
+    const isEbookSettingsOnlyUpdate = progressPayload.ebookSettings !== undefined && Object.keys(progressPayload).every((key) => ['ebookSettings', 'libraryItemId', 'episodeId'].includes(key))
     if (progressPayload.ebookSettings !== undefined) {
       const ebookSettings = MediaProgress.sanitizeEbookSettings(progressPayload.ebookSettings)
       if (ebookSettings) {
@@ -282,7 +288,7 @@ class MediaProgress extends Model {
       this.finishedAt = null
     }
 
-    await this.save()
+    await this.save(isEbookSettingsOnlyUpdate ? { silent: true } : undefined)
 
     // For local sync
     if (progressPayload.lastUpdate) {

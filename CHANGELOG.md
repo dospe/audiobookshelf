@@ -2,6 +2,12 @@
 
 Fork [advplyr/audiobookshelf](https://github.com/advplyr/audiobookshelf) provozovaný jako stack v `/opt/audio` (viz [docs/UPDATE.cs.md](docs/UPDATE.cs.md)). Verze má tvar `<verze upstreamu>-dospe.<pořadí>`: první část říká, na jakém upstreamu fork stojí, přípona se zvyšuje s každou změnou forku. Docker image `ghcr.io/dospe/audiobookshelf` se publikuje s tagy `latest`, `edge` a touto verzí.
 
+## 2.36.0-dospe.2 – 2026-09-07
+
+### Opraveno
+
+- `PATCH /api/me/progress/:id` nesoucí jen `ebookSettings` (nastavení zobrazení knihy uložené z mobilní aplikace nebo webu) už neposouvá `lastUpdate` progressu (ukládá se s `silent: true`). Dosud se každá změna velikosti písma tvářila jako novější pozice čtení, takže mobilní aplikace při srovnávání serverové a lokální pozice (`syncLocalMediaProgressForUser`, Android Auto) dávala přednost starší serverové pozici před novější lokální a čtení v mobilu se rozcházelo s předčítáním. Protikus v aplikaci: dospe/audiobookshelf-app, větev `claude/ebook-tts-sync-mobile-ntqnjk`.
+
 ## 2.36.0-dospe.1 – 2026-09-05
 
 Základ: upstream v2.36.0.
