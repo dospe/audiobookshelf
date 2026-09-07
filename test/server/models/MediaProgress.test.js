@@ -69,4 +69,30 @@ describe('MediaProgress ebookSettings', () => {
     mediaProgress = await Database.mediaProgressModel.findOne({ where: { userId: user.id } })
     expect(mediaProgress.getOldMediaProgress().ebookSettings).to.equal(null)
   })
+
+  it('does not move lastUpdate for an update carrying only ebookSettings', async () => {
+    await user.createUpdateMediaProgressFromPayload({ libraryItemId, ebookLocation: 'epubcfi(/6/2!/4/2/1:0)', ebookProgress: 0.3 })
+    user.mediaProgresses = await Database.mediaProgressModel.findAll({ where: { userId: user.id } })
+
+    // A position update from a device sync carries its own lastUpdate, which becomes updatedAt
+    const lastUpdate = Date.now() - 60 * 60 * 1000
+    await user.createUpdateMediaProgressFromPayload({ libraryItemId, ebookLocation: 'epubcfi(/6/4!/4/2/1:0)', ebookProgress: 0.4, lastUpdate })
+    let mediaProgress = await Database.mediaProgressModel.findOne({ where: { userId: user.id } })
+    expect(mediaProgress.getOldMediaProgress().lastUpdate).to.equal(lastUpdate)
+    user.mediaProgresses = [mediaProgress]
+
+    // Display settings alone leave the position and its timestamp as they are
+    await user.createUpdateMediaProgressFromPayload({ libraryItemId, ebookSettings: { fontScale: 130 } })
+    mediaProgress = await Database.mediaProgressModel.findOne({ where: { userId: user.id } })
+    expect(mediaProgress.extraData.ebookSettings).to.deep.equal({ fontScale: 130 })
+    expect(mediaProgress.ebookLocation).to.equal('epubcfi(/6/4!/4/2/1:0)')
+    expect(mediaProgress.getOldMediaProgress().lastUpdate).to.equal(lastUpdate)
+
+    // A position update (with or without settings) still moves it
+    user.mediaProgresses = [mediaProgress]
+    await user.createUpdateMediaProgressFromPayload({ libraryItemId, ebookLocation: 'epubcfi(/6/6!/4/2/1:0)', ebookProgress: 0.5, ebookSettings: { fontScale: 140 } })
+    mediaProgress = await Database.mediaProgressModel.findOne({ where: { userId: user.id } })
+    expect(mediaProgress.getOldMediaProgress().lastUpdate).to.be.greaterThan(lastUpdate)
+    expect(mediaProgress.extraData.ebookSettings).to.deep.equal({ fontScale: 140 })
+  })
 })
