@@ -56,6 +56,58 @@ describe('MediaProgress ebookSettings', () => {
     expect(mediaProgress.getOldMediaProgress().ebookSettings).to.deep.equal({ theme: 'light', fontScale: 120, legacyEncoding: 'windows-1250' })
   })
 
+  it('keeps the read aloud language of the book and the appearance per device', async () => {
+    const response = await user.createUpdateMediaProgressFromPayload({
+      libraryItemId,
+      ebookSettings: {
+        ttsLanguage: 'cs-CZ',
+        legacyEncoding: 'windows-1250',
+        fontScale: 120,
+        devices: {
+          'phone-1': { fontScale: 100, theme: 'black', ttsLanguage: 'en-US', unknownKey: 'x' },
+          'tablet-1': { fontScale: 160, lineSpacing: 130 },
+          'empty-1': { unknownKey: 'x' },
+          'array-1': [1, 2],
+          'string-1': 'x'
+        }
+      }
+    })
+    expect(response.error).to.be.undefined
+
+    const mediaProgress = await Database.mediaProgressModel.findOne({ where: { userId: user.id } })
+    expect(mediaProgress.extraData.ebookSettings).to.deep.equal({
+      ttsLanguage: 'cs-CZ',
+      legacyEncoding: 'windows-1250',
+      fontScale: 120,
+      devices: {
+        'phone-1': { fontScale: 100, theme: 'black' },
+        'tablet-1': { fontScale: 160, lineSpacing: 130 }
+      }
+    })
+    expect(mediaProgress.getOldMediaProgress().ebookSettings.devices['tablet-1']).to.deep.equal({ fontScale: 160, lineSpacing: 130 })
+  })
+
+  it('drops devices that are not a map of device settings and limits their number', async () => {
+    const devices = {}
+    for (let i = 0; i < 60; i++) devices[`device-${i}`] = { fontScale: 100 + i }
+    devices['x'.repeat(129)] = { fontScale: 50 }
+    await user.createUpdateMediaProgressFromPayload({ libraryItemId, ebookSettings: { theme: 'light', devices } })
+    let mediaProgress = await Database.mediaProgressModel.findOne({ where: { userId: user.id } })
+    expect(Object.keys(mediaProgress.extraData.ebookSettings.devices)).to.have.lengthOf(50)
+    expect(mediaProgress.extraData.ebookSettings.devices['device-0']).to.deep.equal({ fontScale: 100 })
+    expect(mediaProgress.extraData.ebookSettings.devices['x'.repeat(129)]).to.be.undefined
+
+    user.mediaProgresses = [mediaProgress]
+    await user.createUpdateMediaProgressFromPayload({ libraryItemId, ebookSettings: { theme: 'light', devices: ['phone-1'] } })
+    mediaProgress = await Database.mediaProgressModel.findOne({ where: { userId: user.id } })
+    expect(mediaProgress.extraData.ebookSettings).to.deep.equal({ theme: 'light' })
+
+    user.mediaProgresses = [mediaProgress]
+    await user.createUpdateMediaProgressFromPayload({ libraryItemId, ebookSettings: { devices: { 'phone-1': { unknownKey: 'x' } } } })
+    mediaProgress = await Database.mediaProgressModel.findOne({ where: { userId: user.id } })
+    expect(mediaProgress.getOldMediaProgress().ebookSettings).to.equal(null)
+  })
+
   it('clears ebookSettings when null is sent and leaves them untouched when omitted', async () => {
     await user.createUpdateMediaProgressFromPayload({ libraryItemId, ebookSettings: { theme: 'black' } })
     user.mediaProgresses = await Database.mediaProgressModel.findAll({ where: { userId: user.id } })

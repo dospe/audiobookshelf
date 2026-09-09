@@ -2,6 +2,41 @@ const { DataTypes, Model } = require('sequelize')
 const Logger = require('../Logger')
 const { isNullOrNaN } = require('../utils')
 
+// Per-book ereader settings (extraData.ebookSettings): the appearance and the
+// text encoding any client stores at the top level, the read aloud language of
+// the book, and the appearance the mobile app keeps per device under `devices`
+// ({ [deviceId]: { theme, fontScale, ... } }) - a font size that suits a
+// tablet is too big for a phone
+const EBOOK_APPEARANCE_KEYS = ['theme', 'font', 'fontScale', 'lineSpacing', 'fontBoldness', 'textStroke', 'spread']
+const EBOOK_SETTINGS_KEYS = [...EBOOK_APPEARANCE_KEYS, 'legacyEncoding', 'ttsLanguage']
+const EBOOK_SETTINGS_MAX_DEVICES = 50
+const EBOOK_SETTINGS_MAX_DEVICE_ID_LENGTH = 128
+
+function isPlainObject(value) {
+  return !!value && typeof value === 'object' && !Array.isArray(value)
+}
+
+/**
+ * Whitelisted string and number values of an ebook settings object
+ *
+ * @param {Object} settings
+ * @param {string[]} allowedKeys
+ * @returns {Object}
+ */
+function pickEbookSettingValues(settings, allowedKeys) {
+  const picked = {}
+  for (const key of allowedKeys) {
+    const value = settings[key]
+    if (typeof value === 'string') {
+      if (value.length > 64) continue
+      picked[key] = value
+    } else if (typeof value === 'number' && isFinite(value)) {
+      picked[key] = value
+    }
+  }
+  return picked
+}
+
 class MediaProgress extends Model {
   constructor(values, options) {
     super(values, options)
@@ -178,24 +213,25 @@ class MediaProgress extends Model {
 
   /**
    * Per-book ereader settings overrides stored in extraData.
-   * Only whitelisted keys are kept. Returns null when nothing is left.
+   * Only whitelisted keys are kept (see EBOOK_SETTINGS_KEYS): the settings of
+   * the book at the top level and the appearance per device under `devices`.
+   * Returns null when nothing is left.
    *
    * @param {Object|null} ebookSettings
    * @returns {Object|null}
    */
   static sanitizeEbookSettings(ebookSettings) {
-    if (!ebookSettings || typeof ebookSettings !== 'object' || Array.isArray(ebookSettings)) return null
-    const allowedKeys = ['theme', 'font', 'fontScale', 'lineSpacing', 'fontBoldness', 'textStroke', 'spread', 'legacyEncoding']
-    const sanitized = {}
-    for (const key of allowedKeys) {
-      const value = ebookSettings[key]
-      if (value === undefined || value === null) continue
-      if (typeof value === 'string') {
-        if (value.length > 64) continue
-        sanitized[key] = value
-      } else if (typeof value === 'number' && isFinite(value)) {
-        sanitized[key] = value
+    if (!isPlainObject(ebookSettings)) return null
+    const sanitized = pickEbookSettingValues(ebookSettings, EBOOK_SETTINGS_KEYS)
+    if (isPlainObject(ebookSettings.devices)) {
+      const devices = {}
+      for (const deviceId of Object.keys(ebookSettings.devices)) {
+        if (Object.keys(devices).length >= EBOOK_SETTINGS_MAX_DEVICES) break
+        if (!deviceId || deviceId.length > EBOOK_SETTINGS_MAX_DEVICE_ID_LENGTH || !isPlainObject(ebookSettings.devices[deviceId])) continue
+        const deviceSettings = pickEbookSettingValues(ebookSettings.devices[deviceId], EBOOK_APPEARANCE_KEYS)
+        if (Object.keys(deviceSettings).length) devices[deviceId] = deviceSettings
       }
+      if (Object.keys(devices).length) sanitized.devices = devices
     }
     return Object.keys(sanitized).length ? sanitized : null
   }

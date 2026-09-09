@@ -74,7 +74,7 @@ const { DataTypes, Model } = sequelize
  * @property {boolean} [hideFromContinueListening]
  * @property {string} [ebookLocation]
  * @property {number} [ebookProgress]
- * @property {Object|null} [ebookSettings] per-book ereader settings overrides (null clears them)
+ * @property {Object|null} [ebookSettings] per-book ereader settings overrides, the appearance per device under `devices` (null clears them)
  * @property {string} [finishedAt]
  * @property {number} [lastUpdate]
  * @property {number} [markAsFinishedTimeRemaining]
