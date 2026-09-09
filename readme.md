@@ -14,17 +14,18 @@
 
 # About this fork
 
-This is [dospe](https://github.com/dospe)'s fork of [advplyr/audiobookshelf](https://github.com/advplyr/audiobookshelf), kept close to upstream and deployed as a Docker stack in `/opt/audio` together with a Czech metadata provider. Fork versions are `<upstream version>-dospe.<n>` (for example `2.36.0-dospe.1`): the first part is the upstream release the fork is based on, the suffix grows with every fork change. The update check in the web client still compares against upstream releases.
+This is [dospe](https://github.com/dospe)'s fork of [advplyr/audiobookshelf](https://github.com/advplyr/audiobookshelf). It stays close to upstream (upstream `master` is merged regularly) and is deployed as a Docker stack in `/opt/audio` together with a Czech metadata provider. Fork versions are `<upstream version>-dospe.<n>` (for example `2.36.0-dospe.3`): the first part is the upstream release the fork is based on, the suffix grows with every fork change. The version is shown in the web client and in the server log at startup; the update check in the web client still compares against upstream releases.
 
 What differs from upstream:
 
-- `doc`, `docx`, `rtf` and `pdb` files are treated as ebooks, the web reader displays them and remembers display and text encoding settings per book
-- A directory holding several ebooks is scanned as one library item per book (library setting "Split folders with multiple ebooks into separate books", on by default); files sharing a name without extension stay together as one book, author and series come from the parent folders
-- The response timeout of custom metadata providers is configurable (`CUSTOM_METADATA_PROVIDER_TIMEOUT`, default 30 s)
-- The Docker image is built from this repository and published as `ghcr.io/dospe/audiobookshelf` (`latest`, `edge` and the fork version)
-- Deployment and update scripts in `scripts/` (`deploy.sh`, `update-server.sh`) for the `/opt/audio` stack: Audiobookshelf, the Czech metadata provider, Caddy HTTPS reverse proxy and an rclone mount
+- **More ebook formats.** `doc`, `docx`, `rtf` and `pdb` files are treated as ebooks next to `epub`, `pdf`, `mobi`, `azw3`, `cbr` and `cbz`. The web reader opens them and offers a text encoding selector for legacy files that carry no encoding information.
+- **Per-book reader settings.** The reader remembers theme, font, size, line spacing, boldness, spread and text encoding either for one book ("This book") or for all books. The settings are stored with the reading progress (`ebookSettings`), so they follow the user across devices. The mobile app fork ([dospe/audiobookshelf-app](https://github.com/dospe/audiobookshelf-app)) additionally keeps a per-device appearance and the read-aloud language there. Saving these settings never moves the progress timestamp, so a font size change cannot overrule a newer reading position from another device.
+- **One book per ebook file.** A folder holding several ebooks is scanned as one library item per book (library setting "Split folders with multiple ebooks into separate books", on by default). Files sharing a name without extension stay together as one book with its additional formats, cover and `.opf`; author and series are read from the parent folders. See [docs/EBOOKS.md](docs/EBOOKS.md).
+- **Configurable custom metadata provider timeout.** `CUSTOM_METADATA_PROVIDER_TIMEOUT` (milliseconds, default 30000 instead of 10000) for providers that aggregate several slow sources.
+- **Docker image from this repository.** Built for `linux/amd64` and `linux/arm64` on every push to `master` and published as `ghcr.io/dospe/audiobookshelf` with the tags `latest`, `edge` and the fork version.
+- **Deployment and update scripts** in `scripts/`. `deploy.sh` installs or migrates the whole `/opt/audio` stack: Audiobookshelf, the Czech metadata provider (`ghcr.io/stecik/audiobookshelf_czech_metadata`), Caddy as an HTTPS reverse proxy with Let's Encrypt, an rclone mount of cloud storage, extra bind mounts and the container user. `update-server.sh` is an idempotent updater suitable for cron: image pull, config backup, recreation of changed containers only, health checks, rollback to a pinned image. See [docs/UPDATE.md](docs/UPDATE.md).
 
-Fork documentation (Czech): [docs/UPDATE.cs.md](docs/UPDATE.cs.md) (install and update), [docs/EBOOKS.cs.md](docs/EBOOKS.cs.md) (ebook folders and Calibre), [CHANGELOG.md](CHANGELOG.md).
+Fork documentation: [docs/UPDATE.md](docs/UPDATE.md) (install, update, rollback, troubleshooting), [docs/EBOOKS.md](docs/EBOOKS.md) (ebook folders and Calibre), [CHANGELOG.md](CHANGELOG.md).
 
 ## ⚠️ Frontend pull requests are not being reviewed or merged for the existing Vue frontend. The frontend is currently being rewritten and migrated to React and should be available soon.
 
@@ -49,7 +50,10 @@ Audiobookshelf is a self-hosted audiobook and podcast server.
 - Merge your audio files into a single m4b
 - Embed metadata and cover image into your audio files
 - Basic ebook support and ereader
-  - Epub, pdf, cbr, cbz
+  - Epub, pdf, mobi, azw3, cbr, cbz
+  - doc, docx, rtf, pdb with a text encoding selector _(this fork)_
+  - Reader settings remembered per book and synced across devices _(this fork)_
+  - Folders with several ebooks become one book per file _(this fork)_
   - Send ebook to device (i.e. Kindle)
 - Open RSS feeds for podcasts and audiobooks
 
