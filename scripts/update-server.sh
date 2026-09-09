@@ -29,10 +29,10 @@
 #   --dir DIR         Deployment directory (default: $ABS_DIR or /opt/audio)
 #   -h, --help        Show this help
 #
-# Configuration lives in DIR/.env (created by deploy.sh; see docs/UPDATE.cs.md).
+# Configuration lives in DIR/.env (created by deploy.sh; see docs/UPDATE.md).
 # The Caddy site configuration is DIR/caddy/Caddyfile (created once, edit by hand).
 # The rclone remote configuration is DIR/rclone/config/rclone.conf (created with
-# `rclone config`, see docs/UPDATE.cs.md).
+# `rclone config`, see docs/UPDATE.md).
 #
 # Exit codes: 0 ok / up to date, 1 error, 2 update available (only with --check)
 
