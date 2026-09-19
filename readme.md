@@ -14,7 +14,7 @@
 
 # About this fork
 
-This is [dospe](https://github.com/dospe)'s fork of [advplyr/audiobookshelf](https://github.com/advplyr/audiobookshelf). It stays close to upstream (upstream `master` is merged regularly) and is deployed as a Docker stack in `/opt/audio` together with a Czech metadata provider. Fork versions are `<upstream version>-dospe.<n>` (for example `2.36.0-dospe.4`): the first part is the upstream release the fork is based on, the suffix grows with every fork change. The version is shown in the web client and in the server log at startup; the update check in the web client still compares against upstream releases.
+This is [dospe](https://github.com/dospe)'s fork of [advplyr/audiobookshelf](https://github.com/advplyr/audiobookshelf). It stays close to upstream (upstream `master` is merged regularly) and is deployed as a Docker stack in `/opt/audio` together with a Czech metadata provider. Fork versions are `<upstream version>-dospe.<n>` (for example `2.36.1-dospe.5`): the first part is the upstream release the fork is based on, the suffix grows with every fork change. The version is shown in the web client and in the server log at startup; the update check in the web client still compares against upstream releases.
 
 What differs from upstream:
 
@@ -201,7 +201,7 @@ cd ..
 
 After setting up your development environment, either using the dev container or using your own custom environment, the following commands will help you run the server and client.
 
-To run the server, you can use the command `npm run dev`. This will use the client that was built when you ran `npm run generate` in the client directory or when you started the dev container. If you make changes to the server, you will need to restart the server. If you make changes to the client, you will need to run the command `(cd client; npm run generate)` and then restart the server. By default the client runs at `localhost:3333`, though the port can be configured in `dev.js`.
+To run the server, you can use the command `npm run dev`. This will compile the server and use the client that was built when you ran `npm run generate` in the client directory or when you started the dev container. Server changes are compiled and restarted automatically. If you make changes to the client, you will need to run the command `(cd client; npm run generate)` and then restart the server. By default the client runs at `localhost:3333`, though the port can be configured in `dev.js`.
 
 You can also build a version of the client that supports live reloading. To do this, start the server, then run the command `(cd client; npm run dev)`. This will run a separate instance of the client at `localhost:3000` that will be automatically updated as you make changes to the client.
 

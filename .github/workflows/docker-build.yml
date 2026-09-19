@@ -19,6 +19,8 @@ on:
       - server/**
       - index.js
       - package.json
+      - tsconfig.server.json
+      - Dockerfile
 
 # The image is published to the GitHub Container Registry of the repository
 # owner, so forks build their own image without extra secrets
