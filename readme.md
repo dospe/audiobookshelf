@@ -14,7 +14,7 @@
 
 # About this fork
 
-This is [dospe](https://github.com/dospe)'s fork of [advplyr/audiobookshelf](https://github.com/advplyr/audiobookshelf). It stays close to upstream (upstream `master` is merged regularly) and is deployed as a Docker stack in `/opt/audio` together with a Czech metadata provider. Fork versions are `<upstream version>-dospe.<n>` (for example `2.36.1-dospe.5`): the first part is the upstream release the fork is based on, the suffix grows with every fork change. The version is shown in the web client and in the server log at startup; the update check in the web client still compares against upstream releases.
+This is [dospe](https://github.com/dospe)'s fork of [advplyr/audiobookshelf](https://github.com/advplyr/audiobookshelf). It stays close to upstream (upstream `master` is merged regularly) and is deployed as a Docker stack in `/opt/audio` together with a Czech metadata provider. Fork versions are `<upstream version>-dospe.<n>` (for example `2.36.1-dospe.6`): the first part is the upstream release the fork is based on, the suffix grows with every fork change. The version is shown in the web client and in the server log at startup; the update check in the web client still compares against upstream releases.
 
 What differs from upstream:
 

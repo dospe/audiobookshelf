@@ -2,6 +2,12 @@
 
 Fork of [advplyr/audiobookshelf](https://github.com/advplyr/audiobookshelf) run as a Docker stack in `/opt/audio` (see [docs/UPDATE.md](docs/UPDATE.md)). Versions have the form `<upstream version>-dospe.<n>`: the first part says which upstream release the fork is based on, the suffix grows with every fork change. The Docker image `ghcr.io/dospe/audiobookshelf` is published with the tags `latest`, `edge` and this version.
 
+## 2.36.1-dospe.6 – 2026-09-19
+
+### Fixed
+
+- [#16](https://github.com/dospe/audiobookshelf/pull/16) – The Docker image of 2.36.1-dospe.5 never got built: the `build-client` stage of the Dockerfile ran `npm ci` for `linux/arm64` under QEMU on the GitHub runner and died with `Illegal instruction` (the same QEMU problem upstream worked around for `tsc` in the new `compile-server` stage). The client output is static files, so the stage now runs on the builder CPU (`FROM --platform=$BUILDPLATFORM`) like the server compile; the runtime image still installs the native server dependencies for the target platform.
+
 ## 2.36.1-dospe.5 – 2026-09-19
 
 Base: upstream v2.36.1 plus the upstream `master` commits up to `1e88ff01` (15 commits after the release). Conflicts only in the version fields of the package files.
