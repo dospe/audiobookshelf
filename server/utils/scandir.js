@@ -244,8 +244,9 @@ function getBookDataFromDir(relPath, parseSubtitle = false) {
   const splitDir = relPath.split('/')
 
   var folder = splitDir.pop() // Audio files will always be in the directory named for the title
-  series = splitDir.length > 1 ? splitDir.pop() : null // If there are at least 2 more directories, next furthest will be the series
-  author = splitDir.length > 0 ? splitDir.pop() : null // There could be many more directories, but only the top 3 are used for naming /author/series/title/
+  // Declared: the compiled server (dist-server, strict mode) throws on an implicit global
+  const series = splitDir.length > 1 ? splitDir.pop() : null // If there are at least 2 more directories, next furthest will be the series
+  const author = splitDir.length > 0 ? splitDir.pop() : null // There could be many more directories, but only the top 3 are used for naming /author/series/title/
 
   // The  may contain various other pieces of metadata, these functions extract it.
   var [folder, asin] = getASIN(folder)
@@ -344,7 +345,8 @@ function getSequence(folder) {
 function getPublishedYear(folder) {
   var publishedYear = null
 
-  pattern = /^ *\(?([0-9]{4})\)? * - *(.+)/ //Matches #### - title or (####) - title
+  // Declared: the compiled server (dist-server, strict mode) throws on an implicit global
+  const pattern = /^ *\(?([0-9]{4})\)? * - *(.+)/ //Matches #### - title or (####) - title
   var match = folder.match(pattern)
   if (match) {
     publishedYear = match[1]

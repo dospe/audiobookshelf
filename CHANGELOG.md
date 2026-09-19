@@ -2,6 +2,26 @@
 
 Fork of [advplyr/audiobookshelf](https://github.com/advplyr/audiobookshelf) run as a Docker stack in `/opt/audio` (see [docs/UPDATE.md](docs/UPDATE.md)). Versions have the form `<upstream version>-dospe.<n>`: the first part says which upstream release the fork is based on, the suffix grows with every fork change. The Docker image `ghcr.io/dospe/audiobookshelf` is published with the tags `latest`, `edge` and this version.
 
+## 2.36.1-dospe.5 – 2026-09-19
+
+Base: upstream v2.36.1 plus the upstream `master` commits up to `1e88ff01` (15 commits after the release). Conflicts only in the version fields of the package files.
+
+### Changed
+
+- [#15](https://github.com/dospe/audiobookshelf/pull/15) – Upstream `master` merged into the fork. It brings:
+  - v2.36.1: hardened endpoints (the settings PATCH accepts a fixed set of general settings, auth settings only through the auth-settings endpoint; the cover endpoints accept only `webp`, `jpeg` and `png` as the format; the library item `updateMedia` endpoint no longer accepts `ebookFile`, `chapters` and `audioFiles`; narrator, author and share endpoints scoped and returning 404 correctly; comic book extractor path sanitization; `authLoginCustomMessage` sanitized), a logging fix in `AudioMetadataManager` and Weblate updates,
+  - the start of the TypeScript migration ([advplyr#5510](https://github.com/advplyr/audiobookshelf/pull/5510)): the server is compiled with `tsc` (`tsconfig.server.json`, `allowJs`) into `dist-server` and started from there; the Dockerfile compiles it on the build platform (no `tsc` under QEMU on arm64) and the runtime image runs `dist-server/index.js`; `npm test` runs against the compiled output after `npm run build:server`,
+  - the translate-credits workflow.
+- `docker-build.yml` keeps the fork's setup (image published to `ghcr.io/<owner>/audiobookshelf`, no Docker Hub login, no `advplyr/audiobookshelf` repository guard that would skip the fork's builds) and takes over upstream's new path triggers (`Dockerfile`, `tsconfig.server.json`).
+
+### Fixed
+
+- The compiled server runs in strict mode (`"use strict"` in every file of `dist-server`), where a name that was never declared throws `ReferenceError` instead of quietly becoming a global. Upstream `master` has these; the fork's `getBookDataFromFile` tests caught the first one and an `eslint no-undef` pass over `server/` the rest:
+  - `getBookDataFromDir` and `getPublishedYear` in `server/utils/scandir.js` assigned `series`, `author` and `pattern` without declaring them, so the scanner threw for every book folder named from its path (`ReferenceError: series is not defined`) - declared;
+  - `BackupManager` logged an undefined `path` when moving an uploaded backup failed (the log line itself threw) - logs the temp path;
+  - `BinaryManager` referenced `binaryPath` in a catch block it was not declared in - declared outside the `try`;
+  - `podcastUtils.extractStringOrStringify` stringified an undefined `value` and always fell through to an empty string - stringifies the given object as intended.
+
 ## 2.36.0-dospe.4 – 2026-09-19
 
 ### Changed

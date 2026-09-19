@@ -69,7 +69,8 @@ function extractStringOrStringify(json) {
       return json[Object.keys(json)[0]][0]
     }
     // Handles case where html was included without being wrapped in CDATA
-    return JSON.stringify(value)
+    // (`value` was never declared here, so this always fell through to '')
+    return JSON.stringify(json)
   } catch {
     return ''
   }
