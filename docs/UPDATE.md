@@ -171,7 +171,7 @@ is never overwritten.
 ```dotenv
 # --- Audiobookshelf server (fork image) ---
 ABS_IMAGE=ghcr.io/dospe/audiobookshelf
-ABS_TAG=latest                      # edge, a fork version (e.g. 2.36.1-dospe.5), or latest@sha256:<digest>
+ABS_TAG=latest                      # edge, a fork version (e.g. 2.36.1-dospe.6), or latest@sha256:<digest>
 ABS_PORT=13378
 ABS_AUDIOBOOKS_DIR=/opt/audio/audiobooks
 ABS_CONFIG_DIR=/opt/audio/config
