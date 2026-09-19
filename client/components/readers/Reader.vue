@@ -380,8 +380,14 @@ export default {
 
       clearTimeout(this.bookSettingsSaveTimeout)
       const libraryItemId = this.selectedLibraryItem.id
+      // Every key the web reader manages is sent, null for the ones back at
+      // the default: the server merges the update into the stored settings,
+      // so what is left out (the per-device appearance and the read aloud
+      // language the mobile app keeps there) stays as it is
+      const ebookSettings = {}
+      for (const key of BOOK_SETTING_KEYS) ebookSettings[key] = diff?.[key] === undefined ? null : diff[key]
       this.bookSettingsSaveTimeout = setTimeout(() => {
-        this.$axios.$patch(`/api/me/progress/${libraryItemId}`, { ebookSettings: diff }, { progress: false }).catch((error) => {
+        this.$axios.$patch(`/api/me/progress/${libraryItemId}`, { ebookSettings }, { progress: false }).catch((error) => {
           console.error('Failed to save book settings', error)
         })
       }, 1000)

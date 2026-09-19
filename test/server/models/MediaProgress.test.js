@@ -87,23 +87,69 @@ describe('MediaProgress ebookSettings', () => {
     expect(mediaProgress.getOldMediaProgress().ebookSettings.devices['tablet-1']).to.deep.equal({ fontScale: 160, lineSpacing: 130 })
   })
 
-  it('drops devices that are not a map of device settings and limits their number', async () => {
+  it('ignores devices that are not a map of device settings and keeps the entries written last within the limit', async () => {
     const devices = {}
     for (let i = 0; i < 60; i++) devices[`device-${i}`] = { fontScale: 100 + i }
     devices['x'.repeat(129)] = { fontScale: 50 }
     await user.createUpdateMediaProgressFromPayload({ libraryItemId, ebookSettings: { theme: 'light', devices } })
     let mediaProgress = await Database.mediaProgressModel.findOne({ where: { userId: user.id } })
     expect(Object.keys(mediaProgress.extraData.ebookSettings.devices)).to.have.lengthOf(50)
-    expect(mediaProgress.extraData.ebookSettings.devices['device-0']).to.deep.equal({ fontScale: 100 })
+    expect(mediaProgress.extraData.ebookSettings.devices['device-0']).to.be.undefined
+    expect(mediaProgress.extraData.ebookSettings.devices['device-59']).to.deep.equal({ fontScale: 159 })
     expect(mediaProgress.extraData.ebookSettings.devices['x'.repeat(129)]).to.be.undefined
 
+    // An invalid devices value changes nothing, the flat key is still applied
     user.mediaProgresses = [mediaProgress]
-    await user.createUpdateMediaProgressFromPayload({ libraryItemId, ebookSettings: { theme: 'light', devices: ['phone-1'] } })
+    await user.createUpdateMediaProgressFromPayload({ libraryItemId, ebookSettings: { theme: 'black', devices: ['phone-1'] } })
     mediaProgress = await Database.mediaProgressModel.findOne({ where: { userId: user.id } })
-    expect(mediaProgress.extraData.ebookSettings).to.deep.equal({ theme: 'light' })
+    expect(mediaProgress.extraData.ebookSettings.theme).to.equal('black')
+    expect(Object.keys(mediaProgress.extraData.ebookSettings.devices)).to.have.lengthOf(50)
 
+    // A new device pushes the oldest entry out; an entry without a valid key is not stored
     user.mediaProgresses = [mediaProgress]
-    await user.createUpdateMediaProgressFromPayload({ libraryItemId, ebookSettings: { devices: { 'phone-1': { unknownKey: 'x' } } } })
+    await user.createUpdateMediaProgressFromPayload({ libraryItemId, ebookSettings: { devices: { 'phone-1': { fontScale: 90 }, 'phone-2': { unknownKey: 'x' } } } })
+    mediaProgress = await Database.mediaProgressModel.findOne({ where: { userId: user.id } })
+    expect(Object.keys(mediaProgress.extraData.ebookSettings.devices)).to.have.lengthOf(50)
+    expect(mediaProgress.extraData.ebookSettings.devices['device-10']).to.be.undefined
+    expect(mediaProgress.extraData.ebookSettings.devices['device-11']).to.deep.equal({ fontScale: 111 })
+    expect(mediaProgress.extraData.ebookSettings.devices['phone-1']).to.deep.equal({ fontScale: 90 })
+    expect(mediaProgress.extraData.ebookSettings.devices['phone-2']).to.be.undefined
+  })
+
+  it('merges an update into the stored settings: keys and devices left out stay, null removes them', async () => {
+    await user.createUpdateMediaProgressFromPayload({
+      libraryItemId,
+      ebookSettings: { ttsLanguage: 'cs-CZ', theme: 'light', devices: { 'phone-1': { fontScale: 100 }, 'tablet-1': { fontScale: 160, theme: 'black' } } }
+    })
+    user.mediaProgresses = await Database.mediaProgressModel.findAll({ where: { userId: user.id } })
+
+    // The tablet replaces its own entry and leaves the phone and the language alone
+    await user.createUpdateMediaProgressFromPayload({ libraryItemId, ebookSettings: { devices: { 'tablet-1': { fontScale: 170 } } } })
+    let mediaProgress = await Database.mediaProgressModel.findOne({ where: { userId: user.id } })
+    expect(mediaProgress.extraData.ebookSettings).to.deep.equal({
+      ttsLanguage: 'cs-CZ',
+      theme: 'light',
+      devices: { 'phone-1': { fontScale: 100 }, 'tablet-1': { fontScale: 170 } }
+    })
+
+    // The phone removes its entry and changes the language; an invalid value keeps the stored one
+    user.mediaProgresses = [mediaProgress]
+    await user.createUpdateMediaProgressFromPayload({ libraryItemId, ebookSettings: { ttsLanguage: 'en-US', theme: { nested: true }, devices: { 'phone-1': null } } })
+    mediaProgress = await Database.mediaProgressModel.findOne({ where: { userId: user.id } })
+    expect(mediaProgress.extraData.ebookSettings).to.deep.equal({ ttsLanguage: 'en-US', theme: 'light', devices: { 'tablet-1': { fontScale: 170 } } })
+
+    // The web reader writes every flat key (null for the ones at the default) without touching the devices or the language
+    user.mediaProgresses = [mediaProgress]
+    await user.createUpdateMediaProgressFromPayload({
+      libraryItemId,
+      ebookSettings: { theme: null, font: null, fontScale: 130, lineSpacing: null, fontBoldness: null, textStroke: null, spread: null, legacyEncoding: null }
+    })
+    mediaProgress = await Database.mediaProgressModel.findOne({ where: { userId: user.id } })
+    expect(mediaProgress.extraData.ebookSettings).to.deep.equal({ ttsLanguage: 'en-US', fontScale: 130, devices: { 'tablet-1': { fontScale: 170 } } })
+
+    // Removing the last key and the last device leaves no settings
+    user.mediaProgresses = [mediaProgress]
+    await user.createUpdateMediaProgressFromPayload({ libraryItemId, ebookSettings: { ttsLanguage: null, fontScale: null, devices: { 'tablet-1': null, 'unknown-1': null } } })
     mediaProgress = await Database.mediaProgressModel.findOne({ where: { userId: user.id } })
     expect(mediaProgress.getOldMediaProgress().ebookSettings).to.equal(null)
   })

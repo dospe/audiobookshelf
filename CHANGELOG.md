@@ -2,6 +2,22 @@
 
 Fork of [advplyr/audiobookshelf](https://github.com/advplyr/audiobookshelf) run as a Docker stack in `/opt/audio` (see [docs/UPDATE.md](docs/UPDATE.md)). Versions have the form `<upstream version>-dospe.<n>`: the first part says which upstream release the fork is based on, the suffix grows with every fork change. The Docker image `ghcr.io/dospe/audiobookshelf` is published with the tags `latest`, `edge` and this version.
 
+## 2.36.0-dospe.4 – 2026-09-19
+
+### Changed
+
+- [#14](https://github.com/dospe/audiobookshelf/pull/14) – `PATCH /api/me/progress/:id` merges `ebookSettings` into the stored settings of the book instead of replacing them. A flat key (`theme`, `font`, `fontScale`, `lineSpacing`, `fontBoldness`, `textStroke`, `spread`, `legacyEncoding`, `ttsLanguage`) is set by a value and removed by `null`; an entry of `devices` is replaced by an object and removed by `null`; keys and devices left out stay as they are; `ebookSettings: null` still clears everything, as older clients expect. When the map would exceed 50 devices the oldest entries are dropped. Until now every client wrote the whole object: the web reader, which knows only the flat keys, wiped the per-device appearance saved by the mobile app, and a mobile reader left open for days wrote back the device map it had loaded when the book was opened, dropping the entries the other devices had saved since. Both looked like "the app does not remember the settings of this book".
+- The web reader sends every per-book key it manages on each save (`null` for the ones back at the default), so the merge can remove them.
+
+### Counterpart in the mobile app
+
+[dospe/audiobookshelf-app#29](https://github.com/dospe/audiobookshelf-app/pull/29) (branch `claude/cross-device-reading-settings-walw6k`) on top of this server version:
+
+- The appearance saved for a book (font size, theme, ...) was not applied when the book opened, only after any later settings change, whenever the read aloud page step differed from 3: the read aloud sync asked epub.js for the page size before the book was displayed, which throws, and the appearance settings were skipped with it.
+- The app sends only its own device entry and the shared keys of the book (this merge; the whole object on an older server), keeps an unsent save in the preferences and sends it on the next start, and flushes a pending save when the reader closes or the app goes to the background.
+- The reader follows a newer reading position from the server while it is open (socket events, return to the foreground, network back), automatically or after asking, per a new setting; a failed position fetch when the book opens is retried in the background and the stale position is not pushed to the server meanwhile.
+- Read aloud resumed after a longer pause (Android Auto, lock screen, the reader) continues from a newer server position; a downloaded book picked in the car takes the newer of the phone's and the server's position; iOS sends a newer local reading position to the server on the progress sync as Android does; a car or headset disconnect pauses read aloud and saves the position.
+
 ## 2.36.0-dospe.3 – 2026-09-09
 
 Base: upstream v2.36.0 plus the upstream `master` commits up to `0a797ab` (11 commits after the release), merged without conflicts.
