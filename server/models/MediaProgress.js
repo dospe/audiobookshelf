@@ -6,7 +6,13 @@ const { isNullOrNaN } = require('../utils')
 // text encoding any client stores at the top level, the read aloud language of
 // the book, and the appearance the mobile app keeps per device under `devices`
 // ({ [deviceId]: { theme, fontScale, ... } }) - a font size that suits a
-// tablet is too big for a phone
+// tablet is too big for a phone.
+//
+// An update merges into what is stored (see mergeEbookSettings): every client
+// writes only the keys it manages and the entries of the other devices stay.
+// Replacing the whole object let the web reader, which knows only the flat
+// keys, wipe the per-device appearance, and a mobile reader left open for
+// days wrote back the device map it had loaded when the book was opened.
 const EBOOK_APPEARANCE_KEYS = ['theme', 'font', 'fontScale', 'lineSpacing', 'fontBoldness', 'textStroke', 'spread']
 const EBOOK_SETTINGS_KEYS = [...EBOOK_APPEARANCE_KEYS, 'legacyEncoding', 'ttsLanguage']
 const EBOOK_SETTINGS_MAX_DEVICES = 50
@@ -14,6 +20,17 @@ const EBOOK_SETTINGS_MAX_DEVICE_ID_LENGTH = 128
 
 function isPlainObject(value) {
   return !!value && typeof value === 'object' && !Array.isArray(value)
+}
+
+/**
+ * Whether the value is storable as an ebook setting (a short string or a finite number)
+ *
+ * @param {*} value
+ * @returns {boolean}
+ */
+function isEbookSettingValue(value) {
+  if (typeof value === 'string') return value.length <= 64
+  return typeof value === 'number' && isFinite(value)
 }
 
 /**
@@ -26,15 +43,19 @@ function isPlainObject(value) {
 function pickEbookSettingValues(settings, allowedKeys) {
   const picked = {}
   for (const key of allowedKeys) {
-    const value = settings[key]
-    if (typeof value === 'string') {
-      if (value.length > 64) continue
-      picked[key] = value
-    } else if (typeof value === 'number' && isFinite(value)) {
-      picked[key] = value
-    }
+    if (isEbookSettingValue(settings[key])) picked[key] = settings[key]
   }
   return picked
+}
+
+/**
+ * Whether a device id may key an entry of `devices`
+ *
+ * @param {string} deviceId
+ * @returns {boolean}
+ */
+function isValidDeviceId(deviceId) {
+  return !!deviceId && deviceId.length <= EBOOK_SETTINGS_MAX_DEVICE_ID_LENGTH
 }
 
 class MediaProgress extends Model {
@@ -227,13 +248,63 @@ class MediaProgress extends Model {
       const devices = {}
       for (const deviceId of Object.keys(ebookSettings.devices)) {
         if (Object.keys(devices).length >= EBOOK_SETTINGS_MAX_DEVICES) break
-        if (!deviceId || deviceId.length > EBOOK_SETTINGS_MAX_DEVICE_ID_LENGTH || !isPlainObject(ebookSettings.devices[deviceId])) continue
+        if (!isValidDeviceId(deviceId) || !isPlainObject(ebookSettings.devices[deviceId])) continue
         const deviceSettings = pickEbookSettingValues(ebookSettings.devices[deviceId], EBOOK_APPEARANCE_KEYS)
         if (Object.keys(deviceSettings).length) devices[deviceId] = deviceSettings
       }
       if (Object.keys(devices).length) sanitized.devices = devices
     }
     return Object.keys(sanitized).length ? sanitized : null
+  }
+
+  /**
+   * Merge an ebookSettings update into the stored settings of a book:
+   * - `null` clears everything (the reset an older client sends),
+   * - a flat key (see EBOOK_SETTINGS_KEYS) is set by a string or number value
+   *   and removed by `null`; a key left out or with an invalid value stays,
+   * - an entry of `devices` is replaced as a whole by an object of appearance
+   *   keys (the complete override of that device), removed by `null` or by an
+   *   object without a valid key; devices left out stay.
+   * The oldest entries are dropped when a device would push the map past the
+   * limit. Returns the settings to store, null when nothing is left.
+   *
+   * @param {Object|null} current - the stored settings
+   * @param {Object|null} update - the update from the client
+   * @returns {Object|null}
+   */
+  static mergeEbookSettings(current, update) {
+    if (update === null) return null
+    const stored = MediaProgress.sanitizeEbookSettings(current)
+    if (!isPlainObject(update)) return stored
+
+    const merged = { ...(stored || {}) }
+    const devices = isPlainObject(merged.devices) ? { ...merged.devices } : {}
+    delete merged.devices
+
+    for (const key of EBOOK_SETTINGS_KEYS) {
+      if (update[key] === undefined) continue
+      if (update[key] === null) {
+        delete merged[key]
+      } else if (isEbookSettingValue(update[key])) {
+        merged[key] = update[key]
+      }
+    }
+
+    if (isPlainObject(update.devices)) {
+      for (const deviceId of Object.keys(update.devices)) {
+        if (!isValidDeviceId(deviceId) || update.devices[deviceId] === undefined) continue
+        const deviceSettings = isPlainObject(update.devices[deviceId]) ? pickEbookSettingValues(update.devices[deviceId], EBOOK_APPEARANCE_KEYS) : {}
+        // Re-inserted at the end so the entries written last are the ones the limit keeps
+        delete devices[deviceId]
+        if (Object.keys(deviceSettings).length) devices[deviceId] = deviceSettings
+      }
+    }
+
+    const deviceIds = Object.keys(devices)
+    while (deviceIds.length > EBOOK_SETTINGS_MAX_DEVICES) delete devices[deviceIds.shift()]
+    if (deviceIds.length) merged.devices = devices
+
+    return Object.keys(merged).length ? merged : null
   }
 
   get progress() {
@@ -257,7 +328,7 @@ class MediaProgress extends Model {
     // the unchanged server position just because it is "older"
     const isEbookSettingsOnlyUpdate = progressPayload.ebookSettings !== undefined && Object.keys(progressPayload).every((key) => ['ebookSettings', 'libraryItemId', 'episodeId'].includes(key))
     if (progressPayload.ebookSettings !== undefined) {
-      const ebookSettings = MediaProgress.sanitizeEbookSettings(progressPayload.ebookSettings)
+      const ebookSettings = MediaProgress.mergeEbookSettings(this.extraData.ebookSettings, progressPayload.ebookSettings)
       if (ebookSettings) {
         this.extraData.ebookSettings = ebookSettings
       } else {
