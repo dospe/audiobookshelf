@@ -218,6 +218,9 @@ CADDY_IMAGE=caddy
 CADDY_TAG=2
 CADDY_HTTP_PORT=80
 CADDY_HTTPS_PORT=443
+# optional, see "Sites of other projects" below
+CADDY_SITES_DIR=/etc/caddy/sites.d  # used only when the directory exists; empty = off
+CADDY_NETWORK=web                   # docker network shared with those projects
 ```
 
 Changed values in `.env` take effect on the next run of `update-server.sh`
@@ -297,6 +300,53 @@ block:
 ```
 
 In Audiobookshelf keep using the internal URL `http://provider:8000`.
+
+### Sites of other projects
+
+Caddy holds ports 80 and 443, so other projects on the same server cannot run
+their own. Instead they drop a site file into a shared directory and Caddy
+serves it next to Audiobookshelf, without anyone editing this compose project.
+
+Turn it on once by creating the directory and running the update:
+
+```bash
+mkdir -p /etc/caddy/sites.d
+update-server.sh
+```
+
+As long as `CADDY_SITES_DIR` (default `/etc/caddy/sites.d`) exists,
+`update-server.sh`:
+
+- mounts it read-only into the Caddy container as `/etc/caddy/sites.d`,
+- appends `import /etc/caddy/sites.d/*.caddy` to `caddy/Caddyfile` when the
+  line is missing (the rest of the file is not touched; an empty directory is
+  only a warning in the Caddy log),
+- creates the docker network `CADDY_NETWORK` (default `web`) when it does not
+  exist and attaches Caddy to it.
+
+The first run recreates the Caddy container (new mount and network). A
+project then attaches its web container to the same network
+(`networks: web: external: true` in its compose file) and adds for example
+`/etc/caddy/sites.d/example.caddy`:
+
+```caddyfile
+example.com {
+	reverse_proxy example-web:80
+}
+```
+
+Check and load it without downtime (`reload` refuses an invalid config and
+keeps the old one running):
+
+```bash
+docker exec audiobookshelf-caddy caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+docker exec audiobookshelf-caddy caddy reload --config /etc/caddy/Caddyfile
+```
+
+An invalid file left in the directory stops Caddy from starting on its next
+restart, Audiobookshelf's HTTPS included, so always validate after a change.
+To switch the feature off set `CADDY_SITES_DIR=` in `.env`, run
+`update-server.sh` and remove the `import` line from the Caddyfile.
 
 An existing `/opt/audio` installation without Caddy gets it by running
 `deploy.sh` again (it finds the old `caddy` container and takes it over) or

@@ -31,6 +31,9 @@
 #
 # Configuration lives in DIR/.env (created by deploy.sh; see docs/UPDATE.md).
 # The Caddy site configuration is DIR/caddy/Caddyfile (created once, edit by hand).
+# When the shared directory CADDY_SITES_DIR (default /etc/caddy/sites.d) exists,
+# Caddy also serves the *.caddy files other projects put there and joins the
+# docker network CADDY_NETWORK (default web) to reach their containers.
 # The rclone remote configuration is DIR/rclone/config/rclone.conf (created with
 # `rclone config`, see docs/UPDATE.md).
 #
@@ -53,7 +56,7 @@ log() { printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"; }
 die() { log "ERROR: $*" >&2; exit 1; }
 
 usage() {
-  sed -n '2,38p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,41p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 while [[ $# -gt 0 ]]; do
@@ -146,6 +149,13 @@ CADDY_HTTP_PORT="${CADDY_HTTP_PORT:-80}"
 CADDY_HTTPS_PORT="${CADDY_HTTPS_PORT:-443}"
 CADDY_DIR="$ABS_DIR/caddy"
 CADDYFILE="$CADDY_DIR/Caddyfile"
+# Shared site directory for other projects on this server; used only when it exists.
+# CADDY_SITES_DIR= (empty) in .env turns the feature off.
+CADDY_SITES_DIR="${CADDY_SITES_DIR-/etc/caddy/sites.d}"
+CADDY_NETWORK="${CADDY_NETWORK:-web}"
+CADDY_SITES_IMPORT="import /etc/caddy/sites.d/*.caddy"
+CADDY_SITES=0
+[[ "$CADDY_ENABLED" == "true" && -n "$CADDY_SITES_DIR" && -d "$CADDY_SITES_DIR" ]] && CADDY_SITES=1
 RCLONE_ENABLED="${RCLONE_ENABLED:-false}"
 RCLONE_IMAGE="${RCLONE_IMAGE:-rclone/rclone}"
 RCLONE_TAG="${RCLONE_TAG_OVERRIDE:-${RCLONE_TAG:-latest}}"
@@ -170,6 +180,8 @@ if [[ "$RCLONE_ENABLED" == "true" ]]; then
   [[ -n "$RCLONE_REMOTE" ]] || die "RCLONE_ENABLED=true but RCLONE_REMOTE is empty in $ENV_FILE (e.g. gdrive:Audiobookshelf)"
   [[ -f "$RCLONE_CONFIG_DIR/rclone.conf" ]] || die "$RCLONE_CONFIG_DIR/rclone.conf does not exist; create the remote first: docker run --rm -it -v $RCLONE_CONFIG_DIR:/config/rclone $RCLONE_REF config"
 fi
+[[ -z "$CADDY_SITES_DIR" || "$CADDY_SITES_DIR" == /* ]] || die "CADDY_SITES_DIR must be an absolute path"
+[[ "$CADDY_NETWORK" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || die "CADDY_NETWORK is not a valid docker network name"
 [[ -z "$ABS_UID" || "$ABS_UID" =~ ^[0-9]+$ ]] || die "ABS_UID must be numeric"
 [[ -z "$ABS_GID" || "$ABS_GID" =~ ^[0-9]+$ ]] || die "ABS_GID must be numeric"
 for m in $ABS_EXTRA_MOUNTS; do
@@ -229,6 +241,17 @@ if [[ "$CADDY_ENABLED" == "true" && ! -f "$CADDYFILE" ]]; then
   else
     log "Creating $CADDYFILE for $CADDY_DOMAIN"
     write_caddyfile
+  fi
+fi
+# Shared sites: the Caddyfile only gets the import line appended (a glob that
+# matches no file is just a warning in Caddy, so an empty directory is fine)
+if [[ $CADDY_SITES -eq 1 && -f "$CADDYFILE" ]] && ! grep -qxF "$CADDY_SITES_IMPORT" "$CADDYFILE"; then
+  if [[ $CHECK_ONLY -eq 1 ]]; then
+    log "Caddyfile $CADDYFILE has no import of $CADDY_SITES_DIR (would be added)"
+  else
+    log "Adding '$CADDY_SITES_IMPORT' to $CADDYFILE (shared sites in $CADDY_SITES_DIR)"
+    printf '\n# Sites of other projects on this server (%s), added by update-server.sh\n%s\n' \
+      "$CADDY_SITES_DIR" "$CADDY_SITES_IMPORT" >>"$CADDYFILE"
   fi
 fi
 
@@ -402,6 +425,16 @@ EOF
       - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
       - ./caddy/data:/data
       - ./caddy/config:/config
+EOF
+    if [[ $CADDY_SITES -eq 1 ]]; then
+      printf '      - %s:/etc/caddy/sites.d:ro\n' "$CADDY_SITES_DIR"
+      cat <<'EOF'
+    networks:
+      - default
+      - sites
+EOF
+    fi
+    cat <<'EOF'
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:2019/config/"]
       interval: 30s
@@ -409,6 +442,10 @@ EOF
       retries: 3
       start_period: 10s
 EOF
+    if [[ $CADDY_SITES -eq 1 ]]; then
+      # Shared network: containers of other projects that Caddy proxies to join it too
+      printf '\nnetworks:\n  sites:\n    name: %s\n    external: true\n' "$CADDY_NETWORK"
+    fi
   fi
 }
 
@@ -423,6 +460,12 @@ if [[ ! -f "$COMPOSE_FILE" ]] || ! diff -q <(printf '%s\n' "$COMPOSE_CONTENT") "
 fi
 
 compose() { docker compose --project-directory "$ABS_DIR" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"; }
+
+# The shared network is external (it outlives this project), so it is created here
+if [[ $CADDY_SITES -eq 1 && $CHECK_ONLY -eq 0 ]] && ! docker network inspect "$CADDY_NETWORK" >/dev/null 2>&1; then
+  log "Creating docker network $CADDY_NETWORK (shared by Caddy and the sites in $CADDY_SITES_DIR)"
+  docker network create "$CADDY_NETWORK" >/dev/null
+fi
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -603,6 +646,7 @@ fi
 docker image prune -f >/dev/null 2>&1 || true
 if [[ "$CADDY_ENABLED" == "true" ]]; then
   log "Done. Audiobookshelf: https://${CADDY_DOMAIN}/ (directly: http://<server>:${ABS_PORT}/)"
+  [[ $CADDY_SITES -eq 1 ]] && log "Shared sites: $CADDY_SITES_DIR/*.caddy, network $CADDY_NETWORK"
 else
   log "Done. Audiobookshelf: http://<server>:${ABS_PORT}/"
 fi
