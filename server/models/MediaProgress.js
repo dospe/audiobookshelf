@@ -226,6 +226,7 @@ class MediaProgress extends Model {
       ebookLocation: this.ebookLocation,
       ebookProgress: this.ebookProgress,
       ebookSettings: this.extraData?.ebookSettings || null,
+      furthestTime: this.furthestTime,
       lastUpdate: this.updatedAt.valueOf(),
       startedAt: this.createdAt.valueOf(),
       finishedAt: this.finishedAt?.valueOf() || null
@@ -307,6 +308,19 @@ class MediaProgress extends Model {
     return Object.keys(merged).length ? merged : null
   }
 
+  /**
+   * The furthest position ever reached in the media (extraData.furthestTime),
+   * so a client can offer to jump back there after the current position moved
+   * back (a sync from another device, an accidental seek). Progress saved before
+   * it was tracked falls back to the current position.
+   *
+   * @returns {number}
+   */
+  get furthestTime() {
+    const furthestTime = Number(this.extraData?.furthestTime)
+    return Math.max(isNaN(furthestTime) ? 0 : furthestTime, this.currentTime || 0)
+  }
+
   get progress() {
     // Value between 0 and 1
     if (!this.duration) return 0
@@ -337,6 +351,8 @@ class MediaProgress extends Model {
       this.changed('extraData', true)
       delete progressPayload.ebookSettings
     }
+    // Derived from currentTime by the server only
+    delete progressPayload.furthestTime
     if (progressPayload.isFinished !== undefined) {
       if (progressPayload.isFinished && !this.isFinished) {
         this.finishedAt = progressPayload.finishedAt || Date.now()
@@ -347,6 +363,8 @@ class MediaProgress extends Model {
         this.finishedAt = null
         this.extraData.progress = 0
         this.currentTime = 0
+        // Listening starts over
+        delete this.extraData.furthestTime
         this.changed('extraData', true)
         delete progressPayload.finishedAt
         delete progressPayload.currentTime
@@ -358,6 +376,11 @@ class MediaProgress extends Model {
     }
 
     this.set(progressPayload)
+
+    if (this.changed('currentTime') && this.currentTime > (Number(this.extraData.furthestTime) || 0)) {
+      this.extraData.furthestTime = this.currentTime
+      this.changed('extraData', true)
+    }
 
     // Reset hideFromContinueListening if the progress has changed
     if (this.changed('currentTime') && !progressPayload.hideFromContinueListening) {

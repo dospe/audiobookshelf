@@ -1,6 +1,6 @@
 {
   "name": "audiobookshelf",
-  "version": "2.36.1-dospe.6",
+  "version": "2.36.1-dospe.7",
   "buildNumber": 1,
   "description": "Self-hosted audiobook and podcast server",
   "main": "dist-server/index.js",
