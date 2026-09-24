@@ -194,3 +194,77 @@ describe('MediaProgress ebookSettings', () => {
     expect(mediaProgress.extraData.ebookSettings).to.deep.equal({ fontScale: 140 })
   })
 })
+
+describe('MediaProgress furthestTime', () => {
+  let user
+  let libraryItemId
+
+  beforeEach(async () => {
+    global.ServerSettings = {}
+    Database.sequelize = new Sequelize({ dialect: 'sqlite', storage: ':memory:', logging: false })
+    Database.sequelize.uppercaseFirst = (str) => (str ? `${str[0].toUpperCase()}${str.substr(1)}` : '')
+    await Database.buildModels()
+
+    const library = await Database.libraryModel.create({ name: 'Book Library', mediaType: 'book' })
+    const libraryFolder = await Database.libraryFolderModel.create({ path: '/books', libraryId: library.id })
+    const book = await Database.bookModel.create({ title: 'Test Book', audioFiles: [], tags: [], narrators: [], genres: [], chapters: [] })
+    const libraryItem = await Database.libraryItemModel.create({
+      libraryFiles: [],
+      mediaId: book.id,
+      mediaType: 'book',
+      libraryId: library.id,
+      libraryFolderId: libraryFolder.id
+    })
+    libraryItemId = libraryItem.id
+
+    user = await Database.userModel.create({ username: 'listener', type: 'user', isActive: true, permissions: {}, extraData: {} })
+    user.mediaProgresses = []
+  })
+
+  afterEach(async () => {
+    await Database.sequelize.close()
+  })
+
+  const getProgress = () => Database.mediaProgressModel.findOne({ where: { userId: user.id } })
+
+  it('keeps the furthest position when the current position moves back', async () => {
+    await user.createUpdateMediaProgressFromPayload({ libraryItemId, duration: 1000, currentTime: 100 })
+    expect((await getProgress()).getOldMediaProgress().furthestTime).to.equal(100)
+
+    await user.createUpdateMediaProgressFromPayload({ libraryItemId, currentTime: 500 })
+    await user.createUpdateMediaProgressFromPayload({ libraryItemId, currentTime: 200 })
+
+    const oldProgress = (await getProgress()).getOldMediaProgress()
+    expect(oldProgress.currentTime).to.equal(200)
+    expect(oldProgress.furthestTime).to.equal(500)
+  })
+
+  it('ignores a furthestTime sent by a client', async () => {
+    await user.createUpdateMediaProgressFromPayload({ libraryItemId, duration: 1000, currentTime: 100 })
+    await user.createUpdateMediaProgressFromPayload({ libraryItemId, currentTime: 150, furthestTime: 900 })
+
+    expect((await getProgress()).getOldMediaProgress().furthestTime).to.equal(150)
+  })
+
+  it('falls back to the current position for progress saved before furthestTime was tracked', async () => {
+    await user.createUpdateMediaProgressFromPayload({ libraryItemId, duration: 1000, currentTime: 300 })
+    const mediaProgress = await getProgress()
+    delete mediaProgress.extraData.furthestTime
+    mediaProgress.changed('extraData', true)
+    await mediaProgress.save()
+
+    expect((await getProgress()).getOldMediaProgress().furthestTime).to.equal(300)
+  })
+
+  it('starts over when the media is marked as not finished', async () => {
+    await user.createUpdateMediaProgressFromPayload({ libraryItemId, duration: 1000, currentTime: 100 })
+    await user.createUpdateMediaProgressFromPayload({ libraryItemId, currentTime: 995 })
+    expect((await getProgress()).isFinished).to.be.true
+
+    await user.createUpdateMediaProgressFromPayload({ libraryItemId, isFinished: false })
+
+    const oldProgress = (await getProgress()).getOldMediaProgress()
+    expect(oldProgress.currentTime).to.equal(0)
+    expect(oldProgress.furthestTime).to.equal(0)
+  })
+})
