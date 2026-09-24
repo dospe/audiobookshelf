@@ -1,6 +1,6 @@
 {
   "name": "audiobookshelf-client",
-  "version": "2.36.1-dospe.7",
+  "version": "2.36.1-dospe.8",
   "buildNumber": 1,
   "description": "Self-hosted audiobook and podcast client",
   "main": "index.js",

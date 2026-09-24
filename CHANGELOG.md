@@ -2,11 +2,21 @@
 
 Fork of [advplyr/audiobookshelf](https://github.com/advplyr/audiobookshelf) run as a Docker stack in `/opt/audio` (see [docs/UPDATE.md](docs/UPDATE.md)). Versions have the form `<upstream version>-dospe.<n>`: the first part says which upstream release the fork is based on, the suffix grows with every fork change. The Docker image `ghcr.io/dospe/audiobookshelf` is published with the tags `latest`, `edge` and this version.
 
+## 2.36.1-dospe.8 – 2026-09-24
+
+### Added
+
+- The media progress also remembers the furthest place reached in the ebook (`extraData.furthestEbook`, returned as `furthestEbookLocation` and `furthestEbookProgress`): the location with the highest `ebookProgress`. Like `furthestTime` it only moves forward, client values are ignored, marking the item as not finished starts it over and older progress reports its current location. The mobile app uses it for "Go to furthest place" in the reader and in the book menu.
+
+### Fixed
+
+- [#17](https://github.com/dospe/audiobookshelf/pull/17) – `furthestTime` of progress saved before 2.36.1-dospe.7 dropped to the new position on the first move back instead of keeping the position reached.
+
 ## 2.36.1-dospe.7 – 2026-09-24
 
 ### Added
 
-- The media progress remembers the furthest position ever reached (`extraData.furthestTime`, returned as `furthestTime` with the progress). It moves only forward with `currentTime`, a value sent by a client is ignored and marking the item as not finished starts it over; progress saved before this version reports its current position. The mobile app uses it for the "Go to furthest position" option of a book.
+- [#17](https://github.com/dospe/audiobookshelf/pull/17) – The media progress remembers the furthest position ever reached (`extraData.furthestTime`, returned as `furthestTime` with the progress). It moves only forward with `currentTime`, a value sent by a client is ignored and marking the item as not finished starts it over; progress saved before this version reports its current position. The mobile app uses it for the "Go to furthest position" option of a book.
 
 ## 2.36.1-dospe.6 – 2026-09-19
 

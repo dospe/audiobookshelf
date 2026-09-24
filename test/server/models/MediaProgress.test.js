@@ -254,6 +254,35 @@ describe('MediaProgress furthestTime', () => {
     await mediaProgress.save()
 
     expect((await getProgress()).getOldMediaProgress().furthestTime).to.equal(300)
+
+    // Moving back keeps the position it had reached
+    await user.createUpdateMediaProgressFromPayload({ libraryItemId, currentTime: 100 })
+    expect((await getProgress()).getOldMediaProgress().furthestTime).to.equal(300)
+  })
+
+  it('keeps the furthest place in the ebook when reading moves back', async () => {
+    await user.createUpdateMediaProgressFromPayload({ libraryItemId, ebookLocation: 'epubcfi(/6/4)', ebookProgress: 0.2 })
+    await user.createUpdateMediaProgressFromPayload({ libraryItemId, ebookLocation: 'epubcfi(/6/20)', ebookProgress: 0.6 })
+    await user.createUpdateMediaProgressFromPayload({ libraryItemId, ebookLocation: 'epubcfi(/6/8)', ebookProgress: 0.3, furthestEbookProgress: 0.9 })
+
+    const oldProgress = (await getProgress()).getOldMediaProgress()
+    expect(oldProgress.ebookLocation).to.equal('epubcfi(/6/8)')
+    expect(oldProgress.furthestEbookLocation).to.equal('epubcfi(/6/20)')
+    expect(oldProgress.furthestEbookProgress).to.equal(0.6)
+  })
+
+  it('falls back to the current ebook location for progress saved before it was tracked', async () => {
+    await user.createUpdateMediaProgressFromPayload({ libraryItemId, ebookLocation: '40', ebookProgress: 0.4 })
+    const mediaProgress = await getProgress()
+    delete mediaProgress.extraData.furthestEbook
+    mediaProgress.changed('extraData', true)
+    await mediaProgress.save()
+    expect((await getProgress()).getOldMediaProgress().furthestEbookLocation).to.equal('40')
+
+    await user.createUpdateMediaProgressFromPayload({ libraryItemId, ebookLocation: '10', ebookProgress: 0.1 })
+    const oldProgress = (await getProgress()).getOldMediaProgress()
+    expect(oldProgress.furthestEbookLocation).to.equal('40')
+    expect(oldProgress.furthestEbookProgress).to.equal(0.4)
   })
 
   it('starts over when the media is marked as not finished', async () => {
