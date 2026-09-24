@@ -817,6 +817,9 @@ class User extends Model {
         }
       }
       newMediaProgressPayload.extraData.furthestTime = newMediaProgressPayload.currentTime
+      if (newMediaProgressPayload.ebookProgress > 0) {
+        newMediaProgressPayload.extraData.furthestEbook = { location: newMediaProgressPayload.ebookLocation, progress: newMediaProgressPayload.ebookProgress }
+      }
       // Merged into nothing: the same rules as an update (a `null` value removes a key), no devices to keep
       const ebookSettings = this.sequelize.models.mediaProgress.mergeEbookSettings(null, progressPayload.ebookSettings)
       if (ebookSettings) {

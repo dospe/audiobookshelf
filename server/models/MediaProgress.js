@@ -227,6 +227,8 @@ class MediaProgress extends Model {
       ebookProgress: this.ebookProgress,
       ebookSettings: this.extraData?.ebookSettings || null,
       furthestTime: this.furthestTime,
+      furthestEbookLocation: this.furthestEbook.location,
+      furthestEbookProgress: this.furthestEbook.progress,
       lastUpdate: this.updatedAt.valueOf(),
       startedAt: this.createdAt.valueOf(),
       finishedAt: this.finishedAt?.valueOf() || null
@@ -321,6 +323,21 @@ class MediaProgress extends Model {
     return Math.max(isNaN(furthestTime) ? 0 : furthestTime, this.currentTime || 0)
   }
 
+  /**
+   * The furthest place ever reached in the ebook (extraData.furthestEbook), the
+   * ebook counterpart of furthestTime: the location with the highest
+   * ebookProgress. Progress saved before it was tracked falls back to the
+   * current location.
+   *
+   * @returns {{ location: string|null, progress: number }}
+   */
+  get furthestEbook() {
+    const furthest = this.extraData?.furthestEbook
+    const current = { location: this.ebookLocation || null, progress: this.ebookProgress || 0 }
+    if (!isPlainObject(furthest) || !(Number(furthest.progress) > current.progress)) return current
+    return { location: furthest.location || null, progress: Number(furthest.progress) }
+  }
+
   get progress() {
     // Value between 0 and 1
     if (!this.duration) return 0
@@ -351,8 +368,12 @@ class MediaProgress extends Model {
       this.changed('extraData', true)
       delete progressPayload.ebookSettings
     }
-    // Derived from currentTime by the server only
+    // Derived from currentTime and ebookProgress by the server only
     delete progressPayload.furthestTime
+    delete progressPayload.furthestEbookLocation
+    delete progressPayload.furthestEbookProgress
+    let furthestTime = this.furthestTime
+    let furthestEbook = this.furthestEbook
     if (progressPayload.isFinished !== undefined) {
       if (progressPayload.isFinished && !this.isFinished) {
         this.finishedAt = progressPayload.finishedAt || Date.now()
@@ -363,8 +384,11 @@ class MediaProgress extends Model {
         this.finishedAt = null
         this.extraData.progress = 0
         this.currentTime = 0
-        // Listening starts over
+        // Listening and reading start over
         delete this.extraData.furthestTime
+        delete this.extraData.furthestEbook
+        furthestTime = 0
+        furthestEbook = { location: null, progress: 0 }
         this.changed('extraData', true)
         delete progressPayload.finishedAt
         delete progressPayload.currentTime
@@ -377,8 +401,14 @@ class MediaProgress extends Model {
 
     this.set(progressPayload)
 
-    if (this.changed('currentTime') && this.currentTime > (Number(this.extraData.furthestTime) || 0)) {
-      this.extraData.furthestTime = this.currentTime
+    // Compared with the furthest place before the update: for progress saved
+    // before it was tracked that is the current place, which a move back must keep
+    if (this.changed('currentTime')) {
+      this.extraData.furthestTime = Math.max(furthestTime, this.currentTime || 0)
+      this.changed('extraData', true)
+    }
+    if (this.changed('ebookProgress') || this.changed('ebookLocation')) {
+      this.extraData.furthestEbook = this.ebookProgress > furthestEbook.progress ? { location: this.ebookLocation || null, progress: this.ebookProgress } : furthestEbook
       this.changed('extraData', true)
     }
 
