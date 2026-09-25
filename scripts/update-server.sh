@@ -34,6 +34,8 @@
 # When the shared directory CADDY_SITES_DIR (default /etc/caddy/sites.d) exists,
 # Caddy also serves the *.caddy files other projects put there and joins the
 # docker network CADDY_NETWORK (default web) to reach their containers.
+# With CADDY_CLOUDFLARE=true (the domain proxied by Cloudflare, SSL/TLS "Full (strict)")
+# Caddy trusts the Cloudflare IP ranges, kept in DIR/caddy/cloudflare.caddy.
 # The rclone remote configuration is DIR/rclone/config/rclone.conf (created with
 # `rclone config`, see docs/UPDATE.md).
 #
@@ -56,7 +58,7 @@ log() { printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"; }
 die() { log "ERROR: $*" >&2; exit 1; }
 
 usage() {
-  sed -n '2,41p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,43p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 while [[ $# -gt 0 ]]; do
@@ -156,6 +158,15 @@ CADDY_NETWORK="${CADDY_NETWORK:-web}"
 CADDY_SITES_IMPORT="import /etc/caddy/sites.d/*.caddy"
 CADDY_SITES=0
 [[ "$CADDY_ENABLED" == "true" && -n "$CADDY_SITES_DIR" && -d "$CADDY_SITES_DIR" ]] && CADDY_SITES=1
+# Behind the Cloudflare proxy (orange cloud): Caddy trusts the Cloudflare IP ranges, so the
+# visitor's IP (X-Forwarded-For, CF-Connecting-IP) reaches Audiobookshelf instead of Cloudflare's
+CADDY_CLOUDFLARE="${CADDY_CLOUDFLARE:-false}"
+CADDY_CLOUDFLARE_FILE="$CADDY_DIR/cloudflare.caddy"
+CADDY_CLOUDFLARE_IMPORT="import /etc/caddy/cloudflare.caddy"
+CADDY_CF=0
+[[ "$CADDY_ENABLED" == "true" && "$CADDY_CLOUDFLARE" == "true" ]] && CADDY_CF=1
+# Set when the Caddy configuration files changed and the running Caddy has to reload them
+CADDY_RELOAD=0
 RCLONE_ENABLED="${RCLONE_ENABLED:-false}"
 RCLONE_IMAGE="${RCLONE_IMAGE:-rclone/rclone}"
 RCLONE_TAG="${RCLONE_TAG_OVERRIDE:-${RCLONE_TAG:-latest}}"
@@ -180,6 +191,7 @@ if [[ "$RCLONE_ENABLED" == "true" ]]; then
   [[ -n "$RCLONE_REMOTE" ]] || die "RCLONE_ENABLED=true but RCLONE_REMOTE is empty in $ENV_FILE (e.g. gdrive:Audiobookshelf)"
   [[ -f "$RCLONE_CONFIG_DIR/rclone.conf" ]] || die "$RCLONE_CONFIG_DIR/rclone.conf does not exist; create the remote first: docker run --rm -it -v $RCLONE_CONFIG_DIR:/config/rclone $RCLONE_REF config"
 fi
+[[ "$CADDY_CLOUDFLARE" == "true" || "$CADDY_CLOUDFLARE" == "false" ]] || die "CADDY_CLOUDFLARE must be true or false"
 [[ -z "$CADDY_SITES_DIR" || "$CADDY_SITES_DIR" == /* ]] || die "CADDY_SITES_DIR must be an absolute path"
 [[ "$CADDY_NETWORK" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || die "CADDY_NETWORK is not a valid docker network name"
 [[ -z "$ABS_UID" || "$ABS_UID" =~ ^[0-9]+$ ]] || die "ABS_UID must be numeric"
@@ -252,6 +264,104 @@ if [[ $CADDY_SITES -eq 1 && -f "$CADDYFILE" ]] && ! grep -qxF "$CADDY_SITES_IMPO
     log "Adding '$CADDY_SITES_IMPORT' to $CADDYFILE (shared sites in $CADDY_SITES_DIR)"
     printf '\n# Sites of other projects on this server (%s), added by update-server.sh\n%s\n' \
       "$CADDY_SITES_DIR" "$CADDY_SITES_IMPORT" >>"$CADDYFILE"
+  fi
+fi
+
+# Cloudflare proxy: caddy/cloudflare.caddy (rewritten on every run) holds the global
+# `servers` options with the Cloudflare IP ranges; the Caddyfile only gets its import
+# inside the global options block. Rewrites keep the inode (cat >), because Caddy sees
+# these files through single-file bind mounts.
+CLOUDFLARE_IPS_FALLBACK="173.245.48.0/20 103.21.244.0/22 103.22.200.0/22 103.31.4.0/22 141.101.64.0/18 108.162.192.0/18 190.93.240.0/20 188.114.96.0/20 197.234.240.0/22 198.41.128.0/17 162.158.0.0/15 104.16.0.0/13 104.24.0.0/14 172.64.0.0/13 131.0.72.0/22 2400:cb00::/32 2606:4700::/32 2803:f800::/32 2405:b500::/32 2405:8100::/32 2a06:98c0::/29 2c0f:f248::/32"
+
+# Current ranges from cloudflare.com, space separated; empty when they cannot be read
+fetch_cloudflare_ips() {
+  local out="" list r
+  for list in ips-v4 ips-v6; do
+    r="$(curl -fsS --max-time 10 "https://www.cloudflare.com/$list" 2>/dev/null)" || return 0
+    out+=" $r"
+  done
+  out="$(printf '%s\n' $out)"
+  # Accept only a plausible list of CIDRs (an error page must never end up in the config)
+  if [[ -n "$out" ]] && ! grep -qvE '^[0-9a-fA-F.:]+/[0-9]{1,3}$' <<<"$out"; then
+    printf '%s' "$(tr '\n' ' ' <<<"$out" | sed 's/ $//')"
+  fi
+}
+
+build_cloudflare_caddy() {
+  cat <<EOF
+# Managed by update-server.sh (CADDY_CLOUDFLARE=true in .env) - rewritten on every run, do not edit.
+# Imported into the global options block of the Caddyfile. Caddy trusts the Cloudflare
+# proxy, keeps its X-Forwarded-* headers and takes the visitor's IP from CF-Connecting-IP.
+servers {
+	trusted_proxies static $1
+	client_ip_headers CF-Connecting-IP X-Forwarded-For
+}
+EOF
+}
+
+caddyfile_has_cloudflare_import() {
+  [[ -f "$CADDYFILE" ]] && grep -qE "^[[:space:]]*${CADDY_CLOUDFLARE_IMPORT}[[:space:]]*$" "$CADDYFILE"
+}
+
+# Puts the import into the global options block (the leading `{ ... }`), creating the block when missing
+add_cloudflare_import() {
+  local tmp; tmp="$(mktemp)"
+  awk -v imp="$CADDY_CLOUDFLARE_IMPORT" '
+    BEGIN { note = "\t# Cloudflare proxy (CADDY_CLOUDFLARE=true), added by update-server.sh" }
+    !done && /^[[:space:]]*(#.*)?$/ { print; next }
+    !done && /^[[:space:]]*\{[[:space:]]*$/ { print; print note; print "\t" imp; done = 1; next }
+    !done { print "{"; print note; print "\t" imp; print "}"; print ""; done = 1 }
+    { print }
+    END { if (!done) { print "{"; print note; print "\t" imp; print "}" } }
+  ' "$CADDYFILE" >"$tmp"
+  cat "$tmp" >"$CADDYFILE"
+  rm -f "$tmp"
+}
+
+remove_cloudflare_import() {
+  local tmp; tmp="$(mktemp)"
+  grep -vE "^[[:space:]]*(${CADDY_CLOUDFLARE_IMPORT}|# Cloudflare proxy \(CADDY_CLOUDFLARE=true\), added by update-server\.sh)[[:space:]]*$" \
+    "$CADDYFILE" >"$tmp" || true
+  cat "$tmp" >"$CADDYFILE"
+  rm -f "$tmp"
+}
+
+if [[ $CADDY_CF -eq 1 ]]; then
+  if [[ $CHECK_ONLY -eq 1 ]]; then
+    [[ -f "$CADDY_CLOUDFLARE_FILE" ]] || log "$CADDY_CLOUDFLARE_FILE is missing (would be created)"
+    caddyfile_has_cloudflare_import || log "Caddyfile $CADDYFILE has no import of the Cloudflare settings (would be added)"
+  else
+    CF_IPS="$(fetch_cloudflare_ips)"
+    if [[ -z "$CF_IPS" && -f "$CADDY_CLOUDFLARE_FILE" ]]; then
+      log "WARNING: cannot download the Cloudflare IP ranges, keeping $CADDY_CLOUDFLARE_FILE as it is"
+    else
+      if [[ -z "$CF_IPS" ]]; then
+        log "WARNING: cannot download the Cloudflare IP ranges, using the list built into $SCRIPT_NAME"
+        CF_IPS="$CLOUDFLARE_IPS_FALLBACK"
+      fi
+      CF_CONTENT="$(build_cloudflare_caddy "$CF_IPS")"
+      if [[ ! -f "$CADDY_CLOUDFLARE_FILE" ]] || ! diff -q <(printf '%s\n' "$CF_CONTENT") "$CADDY_CLOUDFLARE_FILE" >/dev/null; then
+        log "Writing $CADDY_CLOUDFLARE_FILE ($(wc -w <<<"$CF_IPS") Cloudflare IP ranges)"
+        mkdir -p "$CADDY_DIR"
+        printf '%s\n' "$CF_CONTENT" >"$CADDY_CLOUDFLARE_FILE"
+        CADDY_RELOAD=1
+      fi
+    fi
+    if [[ -f "$CADDYFILE" ]] && ! caddyfile_has_cloudflare_import; then
+      log "Adding '$CADDY_CLOUDFLARE_IMPORT' to the global options of $CADDYFILE"
+      add_cloudflare_import
+      CADDY_RELOAD=1
+    fi
+  fi
+elif caddyfile_has_cloudflare_import; then
+  # Switched off: without the mounted file the import would stop Caddy from starting
+  if [[ $CHECK_ONLY -eq 1 ]]; then
+    log "Caddyfile $CADDYFILE still imports the Cloudflare settings (would be removed)"
+  else
+    log "Removing '$CADDY_CLOUDFLARE_IMPORT' from $CADDYFILE (CADDY_CLOUDFLARE is not true)"
+    remove_cloudflare_import
+    rm -f "$CADDY_CLOUDFLARE_FILE"
+    CADDY_RELOAD=1
   fi
 fi
 
@@ -426,6 +536,11 @@ EOF
       - ./caddy/data:/data
       - ./caddy/config:/config
 EOF
+    if [[ $CADDY_CF -eq 1 ]]; then
+      cat <<'EOF'
+      - ./caddy/cloudflare.caddy:/etc/caddy/cloudflare.caddy:ro
+EOF
+    fi
     if [[ $CADDY_SITES -eq 1 ]]; then
       printf '      - %s:/etc/caddy/sites.d:ro\n' "$CADDY_SITES_DIR"
       cat <<'EOF'
@@ -532,6 +647,35 @@ wait_healthy() {
   return 1
 }
 
+# Applies changed Caddy configuration files: `up -d` recreates Caddy when its compose
+# definition changed (a new mount), `caddy reload` loads the files without downtime
+# (an invalid config is refused and the old one keeps running)
+apply_caddy_config() {
+  [[ $CADDY_RELOAD -eq 1 && "$CADDY_ENABLED" == "true" ]] || return 0
+  if [[ " ${SERVICES[*]} " != *" caddy "* ]]; then
+    log "The Caddy configuration changed; apply it with: $SCRIPT_NAME --service caddy"
+    return 0
+  fi
+  compose up -d caddy >/dev/null
+  wait_healthy docker caddy || { log "ERROR: caddy did not become healthy" >&2; return 1; }
+  log "Reloading the Caddy configuration"
+  if ! docker exec "$(container_name caddy)" caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile; then
+    log "ERROR: Caddy refused the new configuration (the previous one is still running); check $CADDYFILE" >&2
+    return 1
+  fi
+}
+
+# Behind Cloudflare (Full strict) the first certificate cannot be issued through the proxy
+cloudflare_notes() {
+  [[ $CADDY_CF -eq 1 ]] || return 0
+  if [[ -z "$(find "$CADDY_DIR/data/caddy/certificates" -name "${CADDY_DOMAIN}.crt" 2>/dev/null | head -n1)" ]]; then
+    log "WARNING: Caddy has no certificate for $CADDY_DOMAIN yet. Until it gets one, keep the Cloudflare"
+    log "         DNS record on 'DNS only' (grey cloud); switch to 'Proxied' and SSL/TLS 'Full (strict)' afterwards."
+  else
+    log "Cloudflare: proxy trusted by Caddy; use SSL/TLS mode 'Full (strict)'"
+  fi
+}
+
 log "Deployment directory: $ABS_DIR"
 for svc in "${SERVICES[@]}"; do
   img="$(container_image_of "$svc")"
@@ -595,6 +739,8 @@ for svc in "${SERVICES[@]}"; do [[ "${NEEDS[$svc]}" -eq 1 ]] && ANY=1; done
 if [[ $ANY -eq 0 ]]; then
   # `up -d` still applies compose/env changes (port, volumes); it is a no-op otherwise
   compose up -d --remove-orphans "${SERVICES[@]}" >/dev/null
+  apply_caddy_config || exit 1
+  cloudflare_notes
   log "Already up to date, nothing to do"
   exit 0
 fi
@@ -643,7 +789,9 @@ if [[ $FAILED -eq 1 ]]; then
   exit 1
 fi
 
+apply_caddy_config || exit 1
 docker image prune -f >/dev/null 2>&1 || true
+cloudflare_notes
 if [[ "$CADDY_ENABLED" == "true" ]]; then
   log "Done. Audiobookshelf: https://${CADDY_DOMAIN}/ (directly: http://<server>:${ABS_PORT}/)"
   [[ $CADDY_SITES -eq 1 ]] && log "Shared sites: $CADDY_SITES_DIR/*.caddy, network $CADDY_NETWORK"

@@ -451,6 +451,9 @@ CADDY_IMAGE=caddy
 CADDY_TAG=${CADDY_TAG_OVERRIDE:-2}
 CADDY_HTTP_PORT=80
 CADDY_HTTPS_PORT=443
+# true = the domain is proxied by Cloudflare (orange cloud, SSL/TLS "Full (strict)"):
+# Caddy trusts the Cloudflare IP ranges so Audiobookshelf sees the visitors' IPs
+CADDY_CLOUDFLARE=false
 EOF
 }
 

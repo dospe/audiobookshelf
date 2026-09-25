@@ -218,6 +218,7 @@ CADDY_IMAGE=caddy
 CADDY_TAG=2
 CADDY_HTTP_PORT=80
 CADDY_HTTPS_PORT=443
+CADDY_CLOUDFLARE=false              # true = domain proxied by Cloudflare, see "Cloudflare proxy" below
 # optional, see "Sites of other projects" below
 CADDY_SITES_DIR=/etc/caddy/sites.d  # used only when the directory exists; empty = off
 CADDY_NETWORK=web                   # docker network shared with those projects
@@ -300,6 +301,55 @@ block:
 ```
 
 In Audiobookshelf keep using the internal URL `http://provider:8000`.
+
+### Cloudflare proxy (Full strict)
+
+The domain can run behind the Cloudflare proxy (orange cloud) with SSL/TLS mode
+**Full (strict)**: Cloudflare connects to Caddy over HTTPS and checks its Let's
+Encrypt certificate. Set in `.env`:
+
+```bash
+CADDY_CLOUDFLARE=true
+```
+
+and run `update-server.sh`. It then:
+
+- writes `/opt/audio/caddy/cloudflare.caddy` with the global `servers` options
+  (`trusted_proxies` = the current Cloudflare IP ranges from
+  `https://www.cloudflare.com/ips-v4` and `ips-v6`, `client_ip_headers
+  CF-Connecting-IP X-Forwarded-For`). The file is rewritten on every run, so new
+  ranges are picked up by the routine update; when the download fails the
+  existing file is kept (on the first run a built-in list is used),
+- mounts it read-only into the Caddy container and adds
+  `import /etc/caddy/cloudflare.caddy` into the global options block `{ ... }`
+  at the top of the Caddyfile (the block is created when the file has none; the
+  rest of the Caddyfile is not touched),
+- recreates or reloads Caddy.
+
+Without it Caddy does not trust Cloudflare, replaces `X-Forwarded-For` and
+Audiobookshelf sees only Cloudflare's IPs (logs, sessions, login limits). If
+your Caddyfile already has its own `servers` global option, merge the two by
+hand.
+
+Order of the switch, because the first certificate cannot be issued through
+the proxy in Full (strict) (Cloudflare refuses an origin without a valid
+certificate, and TLS-ALPN-01 does not pass through the proxy):
+
+1. Keep the DNS record on **DNS only** (grey cloud) until Caddy has a
+   certificate (`update-server.sh` prints a warning while there is none in
+   `caddy/data`).
+2. Set SSL/TLS to **Full (strict)**, then switch the record to **Proxied**.
+3. Renewals go through the proxy: Caddy answers the HTTP-01 challenge on
+   every request, including those Cloudflare forwards over HTTPS.
+
+Recommended Cloudflare settings: turn off Rocket Loader, add a cache rule that
+bypasses the cache for `/api/*`, `/socket.io/*` and `/hls/*`. WebSockets work
+without any change. On the Free and Pro plans a request body is limited to
+100 MB, so upload large books directly to the disk (or the rclone remote),
+not through the web interface.
+
+To switch it off set `CADDY_CLOUDFLARE=false` and run `update-server.sh`; it
+removes the import from the Caddyfile and the generated file.
 
 ### Sites of other projects
 
